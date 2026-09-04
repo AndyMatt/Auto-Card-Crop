@@ -6,11 +6,14 @@ import argparse
 import cv2
 import numpy as np
 
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
+
 def PrintError():
     print("""No input files found. 
         
 Arguments:
     [file|files]        - Name of file/files to process
+    --dir               - Specify Input directory, '.' is supported.
     --threshhold_thresh - 0-255, Value for threshold strength.
     --threshhold1_type  - Type of Threshold Method 
         0: THRESH_BINARY        - Preferable for Black Backgrounds
@@ -20,12 +23,12 @@ Arguments:
         4: THRESH_TOZERO_INV
     --blur              - 0-255,  Blur Kernal Size, useful for removing noise
     --pad               - size in px, border around final cropped image
-    --outdir            - Specify Output Directory relative to path. '.' is supported.
+    --outdir            - Specify Output Directory relative to path, '.' is supported.
             
 Usage: 
     Rotate.py file1.jpg [file2.jpg ...]
     Rotate.py file1.jpg [file2.jpg ...] --outdir [path]
-    Rotate.py -d [InputDirectory]
+    Rotate.py --dir [InputDirectory]
     Rotate.py file1.jpg --threshhold_thresh 130 --threshhold_type 0""")
     
 def RotateImage(img, angle):
@@ -129,6 +132,8 @@ def build_parser():
     p = argparse.ArgumentParser(description="Auto-rotate and crop trading card photos (white background).")
     p.add_argument('paths', nargs='*',
                     help='Image file(s), or a directory when -d is used ("." for cwd)')
+    p.add_argument('--dir', '--dir', action='store_true',
+                    help='Treat the path argument as a directory and process every image in it')
     p.add_argument('--threshhold_thresh', type=int, default=120,
                     help='Threshold value - card/angle detection (default: 120)')
     p.add_argument('--threshhold1_type', type=int, default=0,
@@ -138,6 +143,19 @@ def build_parser():
     p.add_argument('--outdir', '--outdir', default=None,
                     help='Output directory (default: overwrite alongside each input as .png)')
     return p
+    
+def collect_files(args):
+    if args.dir:
+        directory = args.paths[0] if args.paths else '.'
+        if not os.path.isdir(directory):
+            print(f"Error: '{directory}' is not a directory")
+            sys.exit(1)
+        return sorted(
+            os.path.join(directory, f)
+            for f in os.listdir(directory)
+            if f.lower().endswith(IMAGE_EXTS)
+        )
+    return args.paths
     
 def output_path_for(input_path, outdir):
     base = os.path.splitext(os.path.basename(input_path))[0] + '.png'
@@ -150,7 +168,7 @@ def output_path_for(input_path, outdir):
     
 def main():
     args = build_parser().parse_args()
-    files = args.paths
+    files = collect_files(args)
     
     if not files:
         PrintError()
