@@ -22,7 +22,7 @@ Arguments:
         3: THRESH_TOZERO
         4: THRESH_TOZERO_INV
     --blur              - 0-255,  Blur Kernal Size, useful for removing noise
-    --pad               - size in px, border around final cropped image
+    --pad               - Size in px, border around final cropped image
     --outdir            - Specify Output Directory relative to path, '.' is supported.
             
 Usage: 
@@ -31,33 +31,36 @@ Usage:
     Rotate.py --dir [InputDirectory]
     Rotate.py file1.jpg --threshhold_thresh 130 --threshhold_type 0""")
     
-def RotateImage(img, angle):
-	(h,w) = img.shape[:2]
-	(cX, cY) = (w // 2, h // 2)
+# ---------------------------------------------------------------------------
+# Calculations
+# ---------------------------------------------------------------------------
 
-	M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
-	
-	cos = np.abs(M[0, 0])
-	sin = np.abs(M[0, 1])
-	width = int((h * sin) + (w * cos))
-	height = int((h * cos) + (w * sin))
+def transform(pts, img, padding):
+	pts = np.array(pts, dtype="float32")
 
-	#Recalculate Matrix
-	M[0, 2] += (width / 2) - cX
-	M[1, 2] += (height / 2) - cY
+    # Push each corner outward along the direction from center to that corner
+	center = pts.mean(axis=0)
+	directions = pts - center
+	norms = np.linalg.norm(directions, axis=1, keepdims=True)
+	unit_dirs = directions / norms
+	pts_padded = pts + unit_dirs * padding
 
-	result = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-	return result
-	
-def GetRectIndecies(x,y,w,h,img,border):
-	(source_height, source_width) = img.shape[:2]
-	x0 = max(y-border,0)
-	x1 = min(y+h+(border*2),source_height)
-	y0 = max(x-border,0)
-	y1 = min(x+w+(border*2),source_width)
-	
-	return x0, x1, y0, y1
+	# Axis-aligned bounding box of the padded points
+	x_min, y_min = pts_padded.min(axis=0)
+	x_max, y_max = pts_padded.max(axis=0)
 
+	# Clamp to image bounds
+	h, w = img.shape[:2]
+	x_min = int(max(0, np.floor(x_min)))
+	y_min = int(max(0, np.floor(y_min)))
+	x_max = int(min(w, np.ceil(x_max)))
+	y_max = int(min(h, np.ceil(y_max)))
+
+	return img[y_min:y_max, x_min:x_max]
+    
+# ---------------------------------------------------------------------------
+# Image Functions
+# ---------------------------------------------------------------------------
 def ProcessFile(input, settings):
 	##Read file as input
 	img = cv2.imread(input)
@@ -77,53 +80,26 @@ def ProcessFile(input, settings):
 	th, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
 
 	##Find Contours in Source
-	cnts = cv2.findContours(threshed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
-
-	##Create a copy of the threshold result
-	canvas  = threshed.copy()
-
-	## sort and choose the largest contour
-	cnts = sorted(cnts, key = cv2.contourArea)
-	cnt = cnts[-2]
-
-	## approx the contour, so the get the corner points
-	arclen = cv2.arcLength(cnt, True)
-	approx = cv2.approxPolyDP(cnt, 0.02* arclen, True)
-	cv2.drawContours(canvas, [cnt], -1, (255,0,0), 5, cv2.LINE_AA)
-	cv2.drawContours(canvas, [approx], -1, (0, 0, 255), 5, cv2.LINE_AA)
+	contour_canvas = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
+    
+    ##Collect White Pixels to calculate angle and area
+	white_pixels = np.argwhere(threshed > 0)
+    
+    # OpenCV expects points in [x, y] layout, so we flip the column ordering
+    # Then reshape to format it correctly for OpenCV geometry functions
+	pts = white_pixels[:, ::-1].astype(np.int32)
+    
+    #Get the outer boundary points (Convex Hull)
+	hull = cv2.convexHull(pts)
+    
+    #Simplify the shape down to its main corners (usually 4 for a sheet)
+	epsilon = 0.02 * cv2.arcLength(hull, True)
+	approx_corners = cv2.approxPolyDP(hull, epsilon, True)
 	
 	##Calculate a bounding box
-	contours_op, hierarchy_op = cv2.findContours(threshed, cv2.RETR_TREE,cv2.CHAIN_APPROX_NONE)
-	cnts = sorted(cnts, key = cv2.contourArea)
-	cnt = cnts[-1]
-
-	##Calculate angle of bounding box for rotation
-	_, _, angle = rect = cv2.minAreaRect(cnt)
-	if(angle > 45): angle -= 90
-
-	rotated = RotateImage(img, angle)
-	
-	##Process rotate image
-	imgray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
-
-	##Change the Level Threshold Again
-	th, threshed = cv2.threshold(imgray, 150, settings["threshhold_strength"], settings["threshhold1_type"])
-	cnts = cv2.findContours(threshed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
-	
-	##Find the Contours of the bounding box
-	cnts = cv2.findContours(threshed, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
-	cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-	cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-
-	# Determine the Bounding box using the contours
-	for c in cnts:
-		x,y,w,h = cv2.boundingRect(c)
-		x0, x1, y0, y1 = GetRectIndecies(x,y,w,h,rotated,settings["border_padding"])
-		ROI = rotated[x0:x1, y0:y1]
-		break
-
-	#return result
-	return ROI
+	rect = cv2.minAreaRect(pts)
+	box = np.intp(cv2.boxPoints(rect))
+	return transform(box,img, settings["border_padding"])
     
 # ---------------------------------------------------------------------------
 # Arguments
