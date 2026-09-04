@@ -58,8 +58,8 @@ def GetRectIndecies(x,y,w,h,img):
 def ProcessFile(input):
 	##Read file as input
 	img = cv2.imread(input)
-    if img is None:
-		print(f"Skipping {f}: could not read image")
+	if img is None:
+		print(f"Skipping {img}: could not read image")
 		return None
 		
 	print(f"Processing {input}")
@@ -168,7 +168,7 @@ def main():
 				
             out = output_path_for(f, args.outdir)
             cv2.imwrite(out, img)
-        print(f"Saved {out}")
+            print(f"Saved {out}")
     finally:
         print("Complete")
 		
