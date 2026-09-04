@@ -29,8 +29,8 @@ Arguments:
     --dir               - Specify Input directory, '.' is supported.
     --threshhold_thresh - 0-255, Value for threshold strength.
     --threshhold1_type  - Type of Threshold Method 
-        0: THRESH_BINARY        - Preferable for Black Backgrounds
-        1: THRESH_BINARY_INV    - Preferable for White Backgrounds
+        0: THRESH_BINARY        - Preferable for White Backgrounds
+        1: THRESH_BINARY_INV    - Preferable for Black Backgrounds
         2: THRESH_TRUNC
         3: THRESH_TOZERO
         4: THRESH_TOZERO_INV
@@ -269,6 +269,16 @@ DISPLAY_STEPS = [
     ('roi',              'Final crop'),
 ]
 
+THRESHOLD_TYPES = [
+    (0, "THRESH_BINARY (White Background)"),
+    (1, "THRESH_BINARY_INV (Black Backgrounf)"),
+    (2, "THRESH_TRUNC"),
+    (3, "THRESH_TOZERO"),
+    (4, "THRESH_TOZERO_INV"),
+]
+_THRESH_TYPE_VALUE_TO_LABEL = {value: label for value, label in THRESHOLD_TYPES}
+_THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
+
 THUMB_SIZE = 256
 PREVIEW_SIZE = 1024
 
@@ -292,6 +302,8 @@ class CardCropEditor:
 
         self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
         self.threshold_type_var = tk.IntVar(value=args.threshhold_type)
+        self.threshold_type_label_var = tk.StringVar(
+            value=_THRESH_TYPE_VALUE_TO_LABEL.get(args.threshhold_type, THRESHOLD_TYPES[0][1]))
         self.blur_var = tk.IntVar(value=args.blur)
         self.pad_var = tk.IntVar(value=args.pad)
         self.deskew = tk.BooleanVar(value=args.deskew)
@@ -320,6 +332,24 @@ class CardCropEditor:
         scale.pack(side=tk.TOP, fill=tk.X)
         return box
 
+    def _make_threshold_type_group(self, parent):
+        """Dropdown for the cv2.threshold `type` argument, showing the enum
+        name (and the black/white-background hint) instead of a raw int."""
+        box = ttk.LabelFrame(parent, text="Threshold - Type", padding=6)
+
+        combo = ttk.Combobox(box, textvariable=self.threshold_type_label_var,
+                              values=[label for _, label in THRESHOLD_TYPES],
+                              state='readonly', width=26)
+        combo.pack(side=tk.TOP, fill=tk.X)
+
+        def on_select(event):
+            self.threshold_type_var.set(
+                _THRESH_TYPE_LABEL_TO_VALUE[self.threshold_type_label_var.get()])
+            self._schedule_recompute()
+
+        combo.bind('<<ComboboxSelected>>', on_select)
+        return box
+
     def _build_controls(self):
         top = ttk.Frame(self.root, padding=(8,0,0,0))
         top.pack(side=tk.TOP, fill=tk.X)
@@ -333,8 +363,7 @@ class CardCropEditor:
 
         self._make_slider_group(controls_row, "Threshold - Value",
                                  self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Threshold - Type",
-                                 self.threshold_type_var, 0, 4).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_threshold_type_group(controls_row).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Blur kernel",
                                  self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Padding",
@@ -467,6 +496,8 @@ class CardCropEditor:
     def _on_reset(self):
         self.threshold_val_var.set(self.args.threshhold_val)
         self.threshold_type_var.set(self.args.threshhold_type)
+        self.threshold_type_label_var.set(
+            _THRESH_TYPE_VALUE_TO_LABEL.get(self.args.threshhold_type, THRESHOLD_TYPES[0][1]))
         self.blur_var.set(self.args.blur)
         self.pad_var.set(self.args.pad)
         self.deskew.set(self.args.deskew)
