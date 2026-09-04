@@ -321,7 +321,7 @@ class CardCropEditor:
         return box
 
     def _build_controls(self):
-        top = ttk.Frame(self.root, padding=8)
+        top = ttk.Frame(self.root, padding=(8,0,0,0))
         top.pack(side=tk.TOP, fill=tk.X)
 
         self.filename_var = tk.StringVar(value="")
@@ -361,11 +361,7 @@ class CardCropEditor:
         self.root.bind('<q>', lambda e: self._on_quit())
 
     def _build_viewports(self):
-        hint = ttk.Label(self.root, text="Click a thumbnail to open a larger preview.",
-                          foreground="#666666", padding=(8, 0, 8, 4))
-        hint.pack(side=tk.TOP, anchor='w')
-
-        grid_frame = ttk.Frame(self.root, padding=8)
+        grid_frame = ttk.Frame(self.root, padding=(8, 2, 8, 8))
         grid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.panel_labels = {}
@@ -465,10 +461,7 @@ class CardCropEditor:
         if steps.get('error'):
             self.status_var.set(steps['error'])
         else:
-            self.status_var.set(
-                f"angle={steps.get('angle', 0):.1f}  box={steps.get('box')}  "
-                f"-  looks good, press Save"
-            )
+            self.status_var.set("Status: OK")
 
     # -- button handlers ----------------------------------------------
     def _on_reset(self):
