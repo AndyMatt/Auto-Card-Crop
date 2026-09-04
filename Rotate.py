@@ -49,16 +49,16 @@ def RotateImage(img, angle):
 	result = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
 	return result
 	
-def GetRectIndecies(x,y,w,h,img):
+def GetRectIndecies(x,y,w,h,img,border):
 	(source_height, source_width) = img.shape[:2]
-	x0 = max(y-10,0)
-	x1 = min(y+h+20,source_height)
-	y0 = max(x-10,0)
-	y1 = min(x+w+20,source_width)
+	x0 = max(y-border,0)
+	x1 = min(y+h+(border*2),source_height)
+	y0 = max(x-border,0)
+	y1 = min(x+w+(border*2),source_width)
 	
 	return x0, x1, y0, y1
 
-def ProcessFile(input):
+def ProcessFile(input, settings):
 	##Read file as input
 	img = cv2.imread(input)
 	if img is None:
@@ -68,13 +68,13 @@ def ProcessFile(input):
 	print(f"Processing {input}")
 	
 	##Blur source image to remove artifacts
-	blurred = cv2.blur(img, (20,20))
+	blurred = cv2.blur(img, (settings["blur_strength"],settings["blur_strength"]))
 
 	##Desaturate Source to make it easier to find contours
 	imgray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
 	
 	##Change the threshold of the levels to produce simple geometry
-	th, threshed = cv2.threshold(imgray, 120, 255, 0)
+	th, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
 
 	##Find Contours in Source
 	cnts = cv2.findContours(threshed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
@@ -107,7 +107,7 @@ def ProcessFile(input):
 	imgray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
 
 	##Change the Level Threshold Again
-	th, threshed = cv2.threshold(imgray, 150, 255, 0)
+	th, threshed = cv2.threshold(imgray, 150, settings["threshhold_strength"], settings["threshhold1_type"])
 	cnts = cv2.findContours(threshed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[-2]
 	
 	##Find the Contours of the bounding box
@@ -118,7 +118,7 @@ def ProcessFile(input):
 	# Determine the Bounding box using the contours
 	for c in cnts:
 		x,y,w,h = cv2.boundingRect(c)
-		x0, x1, y0, y1 = GetRectIndecies(x,y,w,h,rotated)
+		x0, x1, y0, y1 = GetRectIndecies(x,y,w,h,rotated,settings["border_padding"])
 		ROI = rotated[x0:x1, y0:y1]
 		break
 
@@ -126,7 +126,7 @@ def ProcessFile(input):
 	return ROI
     
 # ---------------------------------------------------------------------------
-# File System
+# Arguments
 # ---------------------------------------------------------------------------
 def build_parser():
     p = argparse.ArgumentParser(description="Auto-rotate and crop trading card photos (white background).")
@@ -134,16 +134,27 @@ def build_parser():
                     help='Image file(s), or a directory when -d is used ("." for cwd)')
     p.add_argument('--dir', '--dir', action='store_true',
                     help='Treat the path argument as a directory and process every image in it')
-    p.add_argument('--threshhold_thresh', type=int, default=120,
+    p.add_argument('--threshhold_val', type=int, default=120,
                     help='Threshold value - card/angle detection (default: 120)')
     p.add_argument('--threshhold1_type', type=int, default=0,
                     help='Threshold type, cv2.threshold type constant (default: 0)')
-    p.add_argument('--blur', type=int, default=5, help='Blur kernel size (default: 5)')
-    p.add_argument('--pad', type=int, default=10, help='Padding in px around the detected card (default: 10)')
+    p.add_argument('--blur', type=int, default=10, help='Blur kernel size (default: 5)')
+    p.add_argument('--pad', type=int, default=20, help='Padding in px around the detected card (default: 10)')
     p.add_argument('--outdir', '--outdir', default=None,
                     help='Output directory (default: overwrite alongside each input as .png)')
     return p
-    
+
+def get_setting_args(args):
+    return {
+        "threshhold_strength": getattr(args, "threshhold_val", 120),
+        "threshhold1_type": getattr(args, "threshhold1_type", 0),
+        "blur_strength": getattr(args, "blur", 10),
+        "border_padding": getattr(args, "pad", 20)
+    }
+      
+# ---------------------------------------------------------------------------
+# File System
+# ---------------------------------------------------------------------------
 def collect_files(args):
     if args.dir:
         directory = args.paths[0] if args.paths else '.'
@@ -168,6 +179,7 @@ def output_path_for(input_path, outdir):
     
 def main():
     args = build_parser().parse_args()
+    settings = get_setting_args(args)
     files = collect_files(args)
     
     if not files:
@@ -179,7 +191,7 @@ def main():
         
     try:
         for f in files:
-            img = ProcessFile(f)
+            img = ProcessFile(f, settings)
             if img is None:
                 print(f"Failed to detect card bounds in {f}, skipping.")
                 continue
