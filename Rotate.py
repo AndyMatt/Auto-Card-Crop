@@ -340,6 +340,11 @@ class CardCropEditor:
         self._make_slider_group(controls_row, "Padding",
                                  self.pad_var, 0, 60).pack(side=tk.LEFT, padx=(0, 8))
 
+        deskew_box = ttk.LabelFrame(controls_row, text="Deskew", padding=6)
+        ttk.Checkbutton(deskew_box, text="Enabled", variable=self.deskew,
+                         command=self._schedule_recompute).pack(side=tk.TOP, anchor='w')
+        deskew_box.pack(side=tk.LEFT, padx=(0, 8))
+
         btns = ttk.Frame(controls_row)
         btns.pack(side=tk.LEFT, padx=(20, 0))
         ttk.Button(btns, text="Reset", command=self._on_reset).pack(side=tk.LEFT, padx=2)
