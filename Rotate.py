@@ -10,7 +10,7 @@ IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
 try:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import ttk, filedialog
     TKINTER_AVAILABLE = True
 except ImportError:
     TKINTER_AVAILABLE = False
@@ -237,6 +237,31 @@ def create_settings_for_ui(threshhold_val=120, threshhold_type=0, blur_size=5, p
 # ---------------------------------------------------------------------------
 # File System
 # ---------------------------------------------------------------------------
+
+def _pick_source_via_dialog():
+    if not (TKINTER_AVAILABLE and PIL_AVAILABLE):
+        PrintError()
+        return None
+
+    picker_root = tk.Tk()
+    picker_root.withdraw()  # only the dialogs themselves should be visible
+
+    selected = filedialog.askopenfilenames(
+        title="Select card images",
+        filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
+                    ("All files", "*.*")],
+        parent=picker_root,
+    )
+    picker_root.destroy()
+    if not selected:
+        return None
+    args = build_parser().parse_args([])
+    args.dir = False
+    args.paths = list(selected)
+
+    args.ui = True  # a double-click launch implies the interactive editor
+    return args
+    
 def collect_files(args):
     if args.dir:
         directory = args.paths[0] if args.paths else '.'
@@ -547,9 +572,15 @@ class CardCropEditor:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-    
+
 def main():
-    args = build_parser().parse_args()
+    if len(sys.argv) == 1:
+        args = _pick_source_via_dialog()
+        if args is None:
+            sys.exit(0)  # user cancelled - quiet exit, not an error
+    else:
+        args = build_parser().parse_args()
+
     settings = get_setting_args(args)
     files = collect_files(args)
     
@@ -573,8 +604,7 @@ def main():
     
     try:
         for f in files:
-            print(f"Processing {f}")
-            if editor:  
+            if editor:                
                 action = editor.edit(f)
                 if action == 'quit':
                     print("Quit.")
