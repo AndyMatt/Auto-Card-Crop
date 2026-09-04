@@ -146,7 +146,6 @@ def ProcessFile(input, settings):
 		print(f"Skipping {img}: could not read image")
 		return None
 		
-	print(f"Processing {input}")
 	steps['source'] = img
     
 	##Blur source image to remove artifacts
@@ -177,7 +176,6 @@ def ProcessFile(input, settings):
 	##Calculate a bounding box
 	if (settings["deskew"] and len(approx_corners) == 4):
 		box = approx_corners.reshape(4, 2)
-		print("skewing")
 	else:
 	# Fallback to standard bounding box if shape is too noisy
 		rect = cv2.minAreaRect(pts)
@@ -325,11 +323,15 @@ class CardCropEditor:
         def on_move(v, var=var, val_lbl=val_lbl):
             var.set(int(float(v)))
             val_lbl.config(text=str(var.get()))
+
+        def on_release(event):
             self._schedule_recompute()
 
         scale = ttk.Scale(box, from_=frm, to=to, orient=tk.HORIZONTAL,
                            command=on_move, length=150)
         scale.set(var.get())
+        scale.bind('<ButtonRelease-1>', on_release)
+        scale.bind('<KeyRelease>', on_release)  # arrow-key nudges, not just mouse drag
         scale.pack(side=tk.TOP, fill=tk.X)
         return box
 
@@ -571,7 +573,8 @@ def main():
     
     try:
         for f in files:
-            if editor:                
+            print(f"Processing {f}")
+            if editor:  
                 action = editor.edit(f)
                 if action == 'quit':
                     print("Quit.")
