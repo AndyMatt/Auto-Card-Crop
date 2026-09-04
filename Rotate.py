@@ -138,7 +138,7 @@ def RotateImage(img, angle):
 	return result
     
 def ProcessFile(input, settings):
-	steps = {'error': None, 'roi': None}
+	steps = {'error': None, 'result': None}
 
 	##Read file as input
 	img = cv2.imread(input)
@@ -158,10 +158,7 @@ def ProcessFile(input, settings):
 	
 	##Change the threshold of the levels to produce simple geometry
 	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
-	steps['threshhold1_mask'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
-
-	##Find Contours in Source
-	contour_canvas = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
+	steps['threshhold_preview'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
     
     ##Collect White Pixels to calculate angle and area
 	white_pixels = np.argwhere(threshed > 0)
@@ -186,11 +183,16 @@ def ProcessFile(input, settings):
 		rect = cv2.minAreaRect(pts)
 		box = np.intp(cv2.boxPoints(rect))
     
-    #Draw contour overlay
-	cv2.drawContours(contour_canvas, [np.int64(box)], 0, (0, 0, 255), 3)
-	steps['contours_overlay'] = contour_canvas
+    #Draw Previews
+	threshold_crop_previw = threshed.copy()
+	cv2.drawContours(threshold_crop_previw, [np.int64(box)], 0, (0, 0, 255), 3)
+	steps['detected_bounds'] = threshold_crop_previw
 
-	steps['roi'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
+	source_crop_preview = img.copy()
+	cv2.drawContours(source_crop_preview, [np.int64(box)], 0, (0, 0, 255), 3)
+	steps['crop_preview'] = source_crop_preview
+
+	steps['result'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
 	return steps
     
 # ---------------------------------------------------------------------------
@@ -260,13 +262,12 @@ def output_path_for(input_path, outdir):
 # ---------------------------------------------------------------------------
 
 DISPLAY_STEPS = [
-    ('source',           'Source'),
-    ('blurred',          'Blurred'),
-    ('threshhold1_mask', 'Threshold'),
-    ('contours_overlay', 'Contours + approx'),
-    ('rotated',          'Rotated'),
-    ('box_overlay',      'Bounding box'),
-    ('roi',              'Final crop'),
+    ('source',              'Original'),
+    ('blurred',             'Downsample/Blurred'),
+    ('threshhold_preview',  'Threshold'),
+    ('detected_bounds',     'Detected Boundary'),
+    ('crop_preview',        'Crop Preview'),
+    ('result',              'Result'),
 ]
 
 THRESHOLD_TYPES = [
@@ -279,7 +280,7 @@ THRESHOLD_TYPES = [
 _THRESH_TYPE_VALUE_TO_LABEL = {value: label for value, label in THRESHOLD_TYPES}
 _THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
 
-THUMB_SIZE = 256
+THUMB_SIZE = 384
 PREVIEW_SIZE = 1024
 
 
@@ -394,7 +395,7 @@ class CardCropEditor:
         grid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.panel_labels = {}
-        cols = 4
+        cols = 3
         for i, (key, title) in enumerate(DISPLAY_STEPS):
             r, c = divmod(i, cols)
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
@@ -524,7 +525,7 @@ class CardCropEditor:
     # -- public API ----------------------------------------------------
     def edit(self, path):
         """Show the editor for one image. Blocks until Save/Skip/Quit.
-        Returns 'save' | 'skip' | 'quit'. On 'save', self.last_steps['roi']
+        Returns 'save' | 'skip' | 'quit'. On 'save', self.last_steps['result']
         holds the crop to write out."""                    
         self.current_img = path
         self.action = None
