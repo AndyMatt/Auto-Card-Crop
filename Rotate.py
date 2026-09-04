@@ -8,6 +8,19 @@ import numpy as np
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
+try:
+    import tkinter as tk
+    from tkinter import ttk
+    TKINTER_AVAILABLE = True
+except ImportError:
+    TKINTER_AVAILABLE = False
+
+try:
+    from PIL import Image, ImageTk, ImageDraw
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    
 def PrintError():
     print("""No input files found. 
         
@@ -125,6 +138,8 @@ def RotateImage(img, angle):
 	return result
     
 def ProcessFile(input, settings):
+	steps = {'error': None, 'roi': None}
+
 	##Read file as input
 	img = cv2.imread(input)
 	if img is None:
@@ -132,15 +147,18 @@ def ProcessFile(input, settings):
 		return None
 		
 	print(f"Processing {input}")
-	
+	steps['source'] = img
+    
 	##Blur source image to remove artifacts
 	blurred = cv2.blur(img, (settings["blur_strength"],settings["blur_strength"]))
-
+	steps['blurred'] = blurred
+    
 	##Desaturate Source to make it easier to find contours
 	imgray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
 	
 	##Change the threshold of the levels to produce simple geometry
-	th, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
+	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
+	steps['threshhold1_mask'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
 
 	##Find Contours in Source
 	contour_canvas = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
@@ -167,8 +185,13 @@ def ProcessFile(input, settings):
 	# Fallback to standard bounding box if shape is too noisy
 		rect = cv2.minAreaRect(pts)
 		box = np.intp(cv2.boxPoints(rect))
+    
+    #Draw contour overlay
+	cv2.drawContours(contour_canvas, [np.int64(box)], 0, (0, 0, 255), 3)
+	steps['contours_overlay'] = contour_canvas
 
-	return perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
+	steps['roi'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
+	return steps
     
 # ---------------------------------------------------------------------------
 # Arguments
@@ -179,9 +202,11 @@ def build_parser():
                     help='Image file(s), or a directory when -d is used ("." for cwd)')
     p.add_argument('--dir', '--dir', action='store_true',
                     help='Treat the path argument as a directory and process every image in it')
+    p.add_argument('--ui', action='store_true',
+                    help='Open the multi-viewport editor before saving each image')
     p.add_argument('--threshhold_val', type=int, default=120,
                     help='Threshold value - card/angle detection (default: 120)')
-    p.add_argument('--threshhold1_type', type=int, default=0,
+    p.add_argument('--threshhold_type', type=int, default=0,
                     help='Threshold type, cv2.threshold type constant (default: 0)')
     p.add_argument('--blur', type=int, default=10, help='Blur kernel size (default: 5)')
     p.add_argument('--pad', type=int, default=20, help='Padding in px around the detected card (default: 10)')
@@ -194,10 +219,19 @@ def build_parser():
 def get_setting_args(args):
     return {
         "threshhold_strength": getattr(args, "threshhold_val", 120),
-        "threshhold1_type": getattr(args, "threshhold1_type", 0),
+        "threshhold1_type": getattr(args, "threshhold_type", 0),
         "blur_strength": getattr(args, "blur", 10),
         "border_padding": getattr(args, "pad", 20),
-        "deskew": args.perspective_skew
+        "deskew": args.deskew
+    }
+    
+def create_settings_for_ui(threshhold_val=120, threshhold_type=0, blur_size=5, pad=10, deskew=False):
+    return {
+        "threshhold_strength": threshhold_val,
+        "threshhold1_type": threshhold_type,
+        "blur_strength": blur_size,
+        "border_padding": pad,
+        "deskew": deskew
     }
       
 # ---------------------------------------------------------------------------
@@ -220,7 +254,264 @@ def output_path_for(input_path, outdir):
     base = os.path.splitext(os.path.basename(input_path))[0] + '.png'
     directory = outdir if outdir else (os.path.dirname(input_path) or '.')
     return os.path.join(directory, base)
-    
+   
+# ---------------------------------------------------------------------------
+# Editor UI
+# ---------------------------------------------------------------------------
+
+DISPLAY_STEPS = [
+    ('source',           'Source'),
+    ('blurred',          'Blurred'),
+    ('threshhold1_mask', 'Threshold'),
+    ('contours_overlay', 'Contours + approx'),
+    ('rotated',          'Rotated'),
+    ('box_overlay',      'Bounding box'),
+    ('roi',              'Final crop'),
+]
+
+THUMB_SIZE = 256
+PREVIEW_SIZE = 1024
+
+
+class CardCropEditor:
+    def __init__(self, args):
+        self.args = args
+        self.last_steps = None
+        self.current_img = None
+        self.action = None
+        self.photo_refs = {}
+        self._preview_win = None
+        self._preview_img_lbl = None
+        self._preview_photo = None
+        self._preview_key = None
+
+        self.root = tk.Tk()
+        self.root.title("Card Crop Editor")
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
+        self._wait_var = tk.IntVar(value=0)
+
+        self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
+        self.threshold_type_var = tk.IntVar(value=args.threshhold_type)
+        self.blur_var = tk.IntVar(value=args.blur)
+        self.pad_var = tk.IntVar(value=args.pad)
+        self.deskew = tk.BooleanVar(value=args.deskew)
+        self._debounce_id = None
+
+        self._build_controls()
+        self._build_viewports()
+
+    # -- layout -------------------------------------------------------
+    def _make_slider_group(self, parent, title, var, frm, to):
+        """A labeled box containing a value readout and a working slider,
+        stacked vertically with pack() so nothing overlaps."""
+        box = ttk.LabelFrame(parent, text=title, padding=6)
+
+        val_lbl = ttk.Label(box, text=str(var.get()), width=4)
+        val_lbl.pack(side=tk.TOP, anchor='w')
+
+        def on_move(v, var=var, val_lbl=val_lbl):
+            var.set(int(float(v)))
+            val_lbl.config(text=str(var.get()))
+            self._schedule_recompute()
+
+        scale = ttk.Scale(box, from_=frm, to=to, orient=tk.HORIZONTAL,
+                           command=on_move, length=150)
+        scale.set(var.get())
+        scale.pack(side=tk.TOP, fill=tk.X)
+        return box
+
+    def _build_controls(self):
+        top = ttk.Frame(self.root, padding=8)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        self.filename_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.filename_var, font=('', 11, 'bold')).pack(
+            side=tk.TOP, anchor='w', pady=(0, 6))
+
+        controls_row = ttk.Frame(top)
+        controls_row.pack(side=tk.TOP, fill=tk.X)
+
+        self._make_slider_group(controls_row, "Threshold - Value",
+                                 self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_slider_group(controls_row, "Threshold - Type",
+                                 self.threshold_type_var, 0, 4).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_slider_group(controls_row, "Blur kernel",
+                                 self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_slider_group(controls_row, "Padding",
+                                 self.pad_var, 0, 60).pack(side=tk.LEFT, padx=(0, 8))
+
+        btns = ttk.Frame(controls_row)
+        btns.pack(side=tk.LEFT, padx=(20, 0))
+        ttk.Button(btns, text="Reset", command=self._on_reset).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Skip (n)", command=self._on_skip).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Save (s)", command=self._on_save).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Quit (q)", command=self._on_quit).pack(side=tk.LEFT, padx=2)
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self.root, textvariable=self.status_var, padding=(8, 0, 8, 6)).pack(
+            side=tk.TOP, fill=tk.X)
+
+        self.root.bind('<s>', lambda e: self._on_save())
+        self.root.bind('<n>', lambda e: self._on_skip())
+        self.root.bind('<q>', lambda e: self._on_quit())
+
+    def _build_viewports(self):
+        hint = ttk.Label(self.root, text="Click a thumbnail to open a larger preview.",
+                          foreground="#666666", padding=(8, 0, 8, 4))
+        hint.pack(side=tk.TOP, anchor='w')
+
+        grid_frame = ttk.Frame(self.root, padding=8)
+        grid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.panel_labels = {}
+        cols = 4
+        for i, (key, title) in enumerate(DISPLAY_STEPS):
+            r, c = divmod(i, cols)
+            cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
+            cell.grid(row=r, column=c, padx=4, pady=4)
+            ttk.Label(cell, text=title, font=('', 9, 'bold')).pack(side=tk.TOP)
+            img_lbl = ttk.Label(cell, cursor="hand2")
+            img_lbl.pack(side=tk.TOP)
+            img_lbl.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
+            self.panel_labels[key] = img_lbl
+
+    # -- image conversion ----------------------------------------------
+    def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE):
+        if bgr_img is None or bgr_img.size == 0:
+            pil = Image.new('RGB', (max_dim, int(max_dim * 0.7)), (50, 50, 50))
+            if placeholder_text:
+                d = ImageDraw.Draw(pil)
+                d.text((10, 10), placeholder_text, fill=(255, 80, 80))
+            return ImageTk.PhotoImage(pil)
+        rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+        pil.thumbnail((max_dim, max_dim))
+        return ImageTk.PhotoImage(pil)
+
+    # -- click-to-zoom preview -------------------------------------------
+    def _ensure_preview_window(self):
+        if self._preview_win is not None:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Preview")
+        win.protocol("WM_DELETE_WINDOW", self._hide_preview)
+        frame = ttk.Frame(win, padding=6)
+        frame.pack(fill=tk.BOTH, expand=True)
+        img_lbl = ttk.Label(frame)
+        img_lbl.pack(side=tk.TOP)
+        ttk.Button(frame, text="Close", command=self._hide_preview).pack(side=tk.TOP, pady=(6, 0))
+        win.withdraw()
+        self._preview_win = win
+        self._preview_img_lbl = img_lbl
+
+    def _refresh_preview_if_open(self):
+        if self._preview_win is None or self._preview_key is None:
+            return
+        if self._preview_win.state() == 'withdrawn':
+            return
+        self._render_preview(self._preview_key)
+
+    def _render_preview(self, key):
+        title = dict(DISPLAY_STEPS).get(key, key)
+        arr = self.last_steps.get(key) if self.last_steps else None
+        photo = self._to_photo(arr, "N/A" if arr is None else None, max_dim=PREVIEW_SIZE)
+        self._preview_photo = photo  # keep reference alive
+        self._preview_win.title(f"Preview - {title}")
+        self._preview_img_lbl.config(image=photo)
+
+    def _show_preview(self, key):
+        self._preview_key = key
+        self._ensure_preview_window()
+        self._render_preview(key)
+        self._preview_win.deiconify()
+        self._preview_win.lift()
+
+    def _hide_preview(self):
+        if self._preview_win is not None:
+            self._preview_win.withdraw()
+
+    # -- recompute / redraw ----------------------------------------------
+    def _schedule_recompute(self):
+        if self._debounce_id is not None:
+            self.root.after_cancel(self._debounce_id)
+        self._debounce_id = self.root.after(120, self._recompute)
+
+    def _recompute(self):
+        if self.current_img is None:
+            return
+        ui_settings = create_settings_for_ui(
+            self.threshold_val_var.get(),
+            self.threshold_type_var.get(),
+            self.blur_var.get(),
+            self.pad_var.get(),
+            self.deskew.get())
+        steps = ProcessFile(self.current_img, ui_settings)
+        self.last_steps = steps
+
+        for key, _title in DISPLAY_STEPS:
+            arr = steps.get(key)
+            placeholder = "N/A" if arr is None else None
+            photo = self._to_photo(arr, placeholder)
+            self.photo_refs[key] = photo  # keep reference alive
+            self.panel_labels[key].configure(image=photo)
+
+        self._refresh_preview_if_open()
+
+        if steps.get('error'):
+            self.status_var.set(steps['error'])
+        else:
+            self.status_var.set(
+                f"angle={steps.get('angle', 0):.1f}  box={steps.get('box')}  "
+                f"-  looks good, press Save"
+            )
+
+    # -- button handlers ----------------------------------------------
+    def _on_reset(self):
+        self.threshold_val_var.set(self.args.threshhold_val)
+        self.threshold_type_var.set(self.args.threshhold_type)
+        self.blur_var.set(self.args.blur)
+        self.pad_var.set(self.args.pad)
+        self.deskew.set(self.args.deskew)
+        self._recompute()
+
+    def _on_save(self):
+        if not self.last_steps or self.last_steps.get('roi') is None:
+            self.status_var.set("Cannot save - no crop detected. Adjust sliders first.")
+            return
+        self.action = 'save'
+        self._release()
+
+    def _on_skip(self):
+        self.action = 'skip'
+        self._release()
+
+    def _on_quit(self):
+        self.action = 'quit'
+        self._release()
+
+    def _release(self):
+        self._wait_var.set(self._wait_var.get() + 1)
+
+    # -- public API ----------------------------------------------------
+    def edit(self, path):
+        """Show the editor for one image. Blocks until Save/Skip/Quit.
+        Returns 'save' | 'skip' | 'quit'. On 'save', self.last_steps['roi']
+        holds the crop to write out."""                    
+        self.current_img = path
+        self.action = None
+        self.filename_var.set(os.path.basename(path))
+        self.status_var.set("")
+        self._hide_preview()
+        self._recompute()
+        self.root.wait_variable(self._wait_var)
+        return self.action
+
+    def close(self):
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+   
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -233,22 +524,46 @@ def main():
     if not files:
         PrintError()
         sys.exit(1)
+        
+    if args.ui and not (TKINTER_AVAILABLE and PIL_AVAILABLE):
+        missing = []
+        if not TKINTER_AVAILABLE:
+            missing.append("tkinter (ships with standard Python; on Linux install your distro's python3-tk package)")
+        if not PIL_AVAILABLE:
+            missing.append("Pillow (pip install pillow)")
+        print("--ui requires: " + "; ".join(missing))
+        sys.exit(1)
     
     if args.outdir:
         os.makedirs(args.outdir, exist_ok=True)
-        
+ 
+    editor = CardCropEditor(args) if args.ui else None
+    
     try:
         for f in files:
-            img = ProcessFile(f, settings)
-            if img is None:
-                print(f"Failed to detect card bounds in {f}, skipping.")
+            if editor:                
+                action = editor.edit(f)
+                if action == 'quit':
+                    print("Quit.")
+                    break
+                if action == 'skip':
+                    print(f"Skipped {f}")
+                    continue
+                steps = editor.last_steps
+            else:
+                steps = ProcessFile(f, settings)
+                
+            roi = steps.get('roi')
+            if roi is None:
+                print(f"Failed to detect card bounds in {f}, skipping. ({steps.get('error')})")
                 continue
 				
             out = output_path_for(f, args.outdir)
-            cv2.imwrite(out, img)
+            cv2.imwrite(out, roi)
             print(f"Saved {out}")
     finally:
-        print("Complete")
+        if editor:
+            editor.close()
 		
 if __name__ == '__main__':
     main()
