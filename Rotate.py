@@ -137,6 +137,17 @@ def RotateImage(img, angle):
 	result = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
 	return result
     
+def apply_levels(img, black, white):
+    """Photoshop-style black/white point stretch: maps `black` -> 0 and
+    `white` -> 255 (clipping anything outside that range), to boost
+    contrast on washed-out photos before thresholding. Guards against an
+    inverted/zero-width range if the sliders cross."""
+    black = min(black, white - 1)
+    img_f = img.astype(np.float32)
+    stretched = (img_f - black) * (255.0 / (white - black))
+    return np.clip(stretched, 0, 255).astype(np.uint8)
+
+
 def ProcessFile(input, settings):
 	steps = {'error': None, 'result': None}
 
@@ -147,9 +158,15 @@ def ProcessFile(input, settings):
 		return None
 		
 	steps['source'] = img
-    
+
+	##Levels stretch (black/white point) to help detection on low-contrast
+	##photos - this only feeds the threshold/contour pass below; the final
+	##crop still comes from the untouched original `img`
+	leveled = apply_levels(img, settings["levels_black"], settings["levels_white"])
+	steps['leveled'] = leveled
+
 	##Blur source image to remove artifacts
-	blurred = cv2.blur(img, (settings["blur_strength"],settings["blur_strength"]))
+	blurred = cv2.blur(leveled, (settings["blur_strength"],settings["blur_strength"]))
 	steps['blurred'] = blurred
     
 	##Desaturate Source to make it easier to find contours
@@ -176,6 +193,7 @@ def ProcessFile(input, settings):
 	##Calculate a bounding box
 	if (settings["deskew"] and len(approx_corners) == 4):
 		box = approx_corners.reshape(4, 2)
+		print("skewing")
 	else:
 	# Fallback to standard bounding box if shape is too noisy
 		rect = cv2.minAreaRect(pts)
@@ -208,6 +226,10 @@ def build_parser():
                     help='Threshold value - card/angle detection (default: 120)')
     p.add_argument('--threshhold_type', type=int, default=0,
                     help='Threshold type, cv2.threshold type constant (default: 0)')
+    p.add_argument('--levels_black', type=int, default=0,
+                    help='Levels black point, 0-254 (default: 0)')
+    p.add_argument('--levels_white', type=int, default=255,
+                    help='Levels white point, 1-255 (default: 255)')
     p.add_argument('--blur', type=int, default=10, help='Blur kernel size (default: 5)')
     p.add_argument('--pad', type=int, default=20, help='Padding in px around the detected card (default: 10)')
     p.add_argument('--outdir', '--outdir', default=None,
@@ -220,15 +242,19 @@ def get_setting_args(args):
     return {
         "threshhold_strength": getattr(args, "threshhold_val", 120),
         "threshhold1_type": getattr(args, "threshhold_type", 0),
+        "levels_black": getattr(args, "levels_black", 0),
+        "levels_white": getattr(args, "levels_white", 255),
         "blur_strength": getattr(args, "blur", 10),
         "border_padding": getattr(args, "pad", 20),
         "deskew": args.deskew
     }
     
-def create_settings_for_ui(threshhold_val=120, threshhold_type=0, blur_size=5, pad=10, deskew=False):
+def create_settings_for_ui(threshhold_val=120, threshhold_type=0, levels_black=0, levels_white=255, blur_size=5, pad=10, deskew=False):
     return {
         "threshhold_strength": threshhold_val,
         "threshhold1_type": threshhold_type,
+        "levels_black": levels_black,
+        "levels_white": levels_white,
         "blur_strength": blur_size,
         "border_padding": pad,
         "deskew": deskew
@@ -286,6 +312,7 @@ def output_path_for(input_path, outdir):
 
 DISPLAY_STEPS = [
     ('source',              'Original'),
+    ('leveled',             'Levels'),
     ('blurred',             'Downsample/Blurred'),
     ('threshhold_preview',  'Threshold'),
     ('detected_bounds',     'Detected Boundary'),
@@ -328,6 +355,8 @@ class CardCropEditor:
         self.threshold_type_var = tk.IntVar(value=args.threshhold_type)
         self.threshold_type_label_var = tk.StringVar(
             value=_THRESH_TYPE_VALUE_TO_LABEL.get(args.threshhold_type, THRESHOLD_TYPES[0][1]))
+        self.levels_black_var = tk.IntVar(value=args.levels_black)
+        self.levels_white_var = tk.IntVar(value=args.levels_white)
         self.blur_var = tk.IntVar(value=args.blur)
         self.pad_var = tk.IntVar(value=args.pad)
         self.deskew = tk.BooleanVar(value=args.deskew)
@@ -392,6 +421,10 @@ class CardCropEditor:
         self._make_slider_group(controls_row, "Threshold - Value",
                                  self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
         self._make_threshold_type_group(controls_row).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_slider_group(controls_row, "Levels - Black",
+                                 self.levels_black_var, 0, 254).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_slider_group(controls_row, "Levels - White",
+                                 self.levels_white_var, 1, 255).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Blur kernel",
                                  self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Padding",
@@ -500,6 +533,8 @@ class CardCropEditor:
         ui_settings = create_settings_for_ui(
             self.threshold_val_var.get(),
             self.threshold_type_var.get(),
+            self.levels_black_var.get(),
+            self.levels_white_var.get(),
             self.blur_var.get(),
             self.pad_var.get(),
             self.deskew.get())
@@ -526,6 +561,8 @@ class CardCropEditor:
         self.threshold_type_var.set(self.args.threshhold_type)
         self.threshold_type_label_var.set(
             _THRESH_TYPE_VALUE_TO_LABEL.get(self.args.threshhold_type, THRESHOLD_TYPES[0][1]))
+        self.levels_black_var.set(self.args.levels_black)
+        self.levels_white_var.set(self.args.levels_white)
         self.blur_var.set(self.args.blur)
         self.pad_var.set(self.args.pad)
         self.deskew.set(self.args.deskew)
