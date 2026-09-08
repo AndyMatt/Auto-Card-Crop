@@ -316,6 +316,7 @@ class CardCropEditor:
         self.current_img = None
         self.action = None
         self.photo_refs = {}
+        self._photo_references = {}
         self._preview_win = None
         self._preview_img_lbl = None
         self._preview_photo = None
@@ -339,6 +340,9 @@ class CardCropEditor:
 
         self._build_controls()
         self._build_viewports()
+
+        self.root.update_idletasks()
+        self._initialized = True
 
     # -- layout -------------------------------------------------------
     def _make_slider_group(self, parent, title, var, frm, to):
@@ -437,24 +441,128 @@ class CardCropEditor:
             grid_frame.columnconfigure(c, weight=1)
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
             cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
-            ttk.Label(cell, text=title, font=('', 9, 'bold')).pack(side=tk.TOP)
-            img_lbl = ttk.Label(cell, cursor="hand2")
-            img_lbl.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-            img_lbl.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
-            self.panel_labels[key] = img_lbl
+            cell.rowconfigure(0, weight=0)  # Title row stays compact
+            cell.rowconfigure(1, weight=1)  # Debug container takes remaining space
+            cell.columnconfigure(0, weight=1)
+            title_lbl = ttk.Label(cell, text=title, font=('', 9, 'bold'))
+            title_lbl.pack(side=tk.TOP)
+            cell.pack_propagate(False)
+            debug_panel = tk.Frame(cell, background="magenta", bd=0, highlightthickness=0)
+            debug_panel.grid(row=1, column=0, sticky="nsew")
+            debug_panel.rowconfigure(0, weight=1)
+            debug_panel.columnconfigure(0, weight=1)
+            canvas = tk.Canvas(
+                debug_panel, 
+                width=1, 
+                height=1, 
+                highlightthickness=0, 
+                bd=0, 
+                cursor="hand2",
+                background="#00ff00" 
+            )
+            canvas.grid(row=0, column=0, sticky="nsew")
+            canvas.bind("<Configure>", lambda event, k=key: self._on_viewport_configure(event, k))
+            canvas.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
+            #img_container.bind('<Configure>', self._on_label_resize)
+            self.panel_labels[key] = canvas
+
+    def _on_viewport_configure(self, event, key):
+        """Triggers a clean re-render using a guaranteed, explicitly passed key."""
+        # 1. Ignore early structural layout calculations
+        if event.width < 10 or event.height < 10:
+            return
+            
+        # 2. If data is missing or empty, render a placeholder state instead of breaking
+        if not hasattr(self, 'last_steps') or not self.last_steps or key not in self.last_steps:
+            print("recreating vancas")
+            canvas = event.widget
+            # If event.widget returned a string path name, resolve it safely
+            if isinstance(canvas, str):
+                canvas = self.root.nametowidget(canvas)
+                
+            canvas.delete("all")
+            canvas.create_text(
+                event.width // 2, 
+                event.height // 2, 
+                text="Awaiting Data...", 
+                fill="#888888", 
+                anchor="center"
+            )
+            return
+
+        # 3. Everything is verified! Trigger your optimal OpenCV rendering function
+        self._render_preview(key)
+
+
+
+    def _on_canvas_resize(self, event):
+        """Safely resizes the actual image data because canvas layout is locked."""
+        canvas = event.widget
+        key = getattr(canvas, 'key', None)
+        if not key or not self.last_steps or key not in self.last_steps:
+            return
+
+        # 1. Get the real bounding box of the canvas
+        w, h = event.width, event.height
+        if w <= 10 or h <= 10:
+            return
+
+        # 2. Determine the maximum dimension to fit inside this viewport (accounting for aspect ratio)
+        max_dim = min(w, h)
+
+        # 3. Re-render the image asset at the exact scaled size
+        # (This will NOT trigger another resize event because the canvas size is fixed by the grid)
+        arr = self.last_steps.get(key)
+        photo = self._to_photo(arr, None, max_dim=max_dim)
+        
+        self._photo_references[key] = photo
+        canvas.delete("all")
+        canvas.create_image(w // 2, h // 2, image=photo, anchor="center")
 
     # -- image conversion ----------------------------------------------
-    def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE):
+    def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE, size=None):
+        # 1. Handle missing or empty images using basic Pillow layout placeholders
         if bgr_img is None or bgr_img.size == 0:
-            pil = Image.new('RGB', (max_dim, int(max_dim * 0.7)), (50, 50, 50))
+            tgt_w, tgt_h = size if size else (max_dim, max_dim)
+            pil = Image.new('RGB', (tgt_w, tgt_h), (50, 50, 50))
             if placeholder_text:
                 d = ImageDraw.Draw(pil)
                 d.text((10, 10), placeholder_text, fill=(255, 80, 80))
             return ImageTk.PhotoImage(pil)
-        rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
+        # 2. Extract dimensions directly from the raw NumPy shape tuple
+        # OpenCV shape returns (height, width, channels)
+        src_h, src_w = bgr_img.shape[:2]
+
+        if size is not None:
+            canvas_w, canvas_h = size
+
+            # Calculate fast float scaling vectors
+            ratio_w = canvas_w / src_w
+            ratio_h = canvas_h / src_h
+            scale = min(ratio_w, ratio_h)
+
+            # Round down to valid integer dimensions
+            tgt_w = max(1, int(src_w * scale))
+            tgt_h = max(1, int(src_h * scale))
+
+            # --- OPTIMIZED OPENCV RESIZE INTERPOLATION ---
+            # cv2.INTER_AREA is best for downscaling; cv2.INTER_LINEAR is fastest for upscaling
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            resized_bgr = cv2.resize(bgr_img, (tgt_w, tgt_h), interpolation=interp)
+        else:
+            # Fallback scaling rule using max_dim constraints via cv2
+            scale = max_dim / max(src_w, src_h)
+            if scale < 1.0:
+                resized_bgr = cv2.resize(bgr_img, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            else:
+                resized_bgr = bgr_img
+
+        # 3. Final Conversion pass directly to Tkinter layout asset
+        rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        pil.thumbnail((max_dim, max_dim))
         return ImageTk.PhotoImage(pil)
+
 
     # -- click-to-zoom preview -------------------------------------------
     def _ensure_preview_window(self):
@@ -480,19 +588,38 @@ class CardCropEditor:
         self._render_preview(self._preview_key)
 
     def _render_preview(self, key):
-        title = dict(DISPLAY_STEPS).get(key, key)
         arr = self.last_steps.get(key) if self.last_steps else None
-        photo = self._to_photo(arr, "N/A" if arr is None else None, max_dim=PREVIEW_SIZE)
-        self._preview_photo = photo  # keep reference alive
-        self._preview_win.title(f"Preview - {title}")
-        self._preview_img_lbl.config(image=photo)
+        canvas = self.panel_labels.get(key)
+        
+        if canvas:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            
+            if w <= 10 or h <= 10:
+                w, h = 200, 200
+
+            canvas.delete("all")
+
+            # Passes the absolute viewport bounds down to the ratio calculator
+            photo = self._to_photo(arr, "N/A" if arr is None else None, size=(w, h))
+            
+            self._photo_references[key] = photo
+            
+            canvas.create_image(
+                w // 2, 
+                h // 2, 
+                image=photo, 
+                anchor="center",
+                tags="preview_img"
+            )
+
 
     def _show_preview(self, key):
-        self._preview_key = key
-        self._ensure_preview_window()
+        #self._preview_key = key
+        #self._ensure_preview_window()
         self._render_preview(key)
-        self._preview_win.deiconify()
-        self._preview_win.lift()
+        #self._preview_win.deiconify()
+        #self._preview_win.lift()
 
     def _hide_preview(self):
         if self._preview_win is not None:
@@ -517,15 +644,38 @@ class CardCropEditor:
             self.deskew.get())
         steps = ProcessFile(self.current_img, ui_settings)
         self.last_steps = steps
-
+        
         for key, _title in DISPLAY_STEPS:
             arr = steps.get(key)
             placeholder = "N/A" if arr is None else None
             photo = self._to_photo(arr, placeholder)
             self.photo_refs[key] = photo  # keep reference alive
-            self.panel_labels[key].configure(image=photo)
+            canvas = self.panel_labels[key]
+            if canvas:
+                # Clear any previous images drawn on this canvas frame
+                canvas.delete("all")
 
-        self._refresh_preview_if_open()
+                w = canvas.winfo_width()
+                h = canvas.winfo_height()
+
+                if w <= 1 or h <= 1:
+                    w, h = 200, 200 
+                
+                print(w)
+                print(h)
+                
+                # Draw the image positioned exactly at the center of the canvas
+                # "anchor='center'" acts like .NET's Center alignment profile
+                canvas.create_image(
+                    w // 2, 
+                    h // 2, 
+                    image=photo, 
+                    anchor="center",
+                    tags="preview_img"
+                )
+            #self.panel_labels[key].configure(image=photo)
+
+       #self._refresh_preview_if_open()
 
         if steps.get('error'):
             self.status_var.set(steps['error'])
