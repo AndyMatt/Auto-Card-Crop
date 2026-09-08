@@ -49,23 +49,6 @@ Usage:
 # Calculations
 # ---------------------------------------------------------------------------
 
-#Orders 4 points in the sequence: top-left, top-right, bottom-right,bottom-left.
-def order_points(pts):
-  pts = np.array(pts, dtype="float32")
-
-  # Top-left has smallest sum, bottom-right has largest sum
-  s = pts.sum(axis=1)
-  rect = np.zeros((4, 2), dtype="float32")
-  rect[0] = pts[np.argmin(s)]
-  rect[2] = pts[np.argmax(s)]
-
-  # Top-right has smallest difference, bottom-left has largest difference
-  diff = np.diff(pts, axis=1)
-  rect[1] = pts[np.argmin(diff)]
-  rect[3] = pts[np.argmax(diff)]
-
-  return rect
-  
 def perspectiveTransform(pts_src, img, skew):
     if not skew:
         # Axis-aligned bounding box of the padded points
@@ -107,37 +90,29 @@ def perspectiveTransform(pts_src, img, skew):
     return cv2.warpPerspective(img, M, (max_width, max_height))
 
 def pad_corners(pts, padding):
-    pts_src = order_points(pts)
-
-    center = pts_src.mean(axis=0)
-    directions = pts_src - center
+    pts = np.array(pts, dtype="float32")
+ 
+    # Top-left has smallest sum, bottom-right has largest sum
+    s = pts.sum(axis=1)
+    rect = np.zeros((4, 2), dtype="float32")
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+ 
+    # Top-right has smallest difference, bottom-left has largest difference
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+ 
+    center = rect.mean(axis=0)
+    directions = rect - center
     norms = np.linalg.norm(directions, axis=1, keepdims=True)
     unit_dirs = directions / norms
-    return pts_src + unit_dirs * padding
-
+    return rect + unit_dirs * padding
     
 # ---------------------------------------------------------------------------
 # Image Functions
 # ---------------------------------------------------------------------------
- 
-def RotateImage(img, angle):
-	(h,w) = img.shape[:2]
-	(cX, cY) = (w // 2, h // 2)
-
-	M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
-	
-	cos = np.abs(M[0, 0])
-	sin = np.abs(M[0, 1])
-	width = int((h * sin) + (w * cos))
-	height = int((h * cos) + (w * sin))
-
-	#Recalculate Matrix
-	M[0, 2] += (width / 2) - cX
-	M[1, 2] += (height / 2) - cY
-
-	result = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-	return result
-    
+     
 def apply_levels(img, black, white):
     """Photoshop-style black/white point stretch: maps `black` -> 0 and
     `white` -> 255 (clipping anything outside that range), to boost
