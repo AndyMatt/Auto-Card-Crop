@@ -5,6 +5,8 @@ import os
 import argparse
 import cv2
 import numpy as np
+import ctypes
+from ctypes import wintypes
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
@@ -258,7 +260,64 @@ def output_path_for(input_path, outdir):
     base = os.path.splitext(os.path.basename(input_path))[0] + '.png'
     directory = outdir if outdir else (os.path.dirname(input_path) or '.')
     return os.path.join(directory, base)
-   
+# ---------------------------------------------------------------------------
+# WND PROC Hooks
+# ---------------------------------------------------------------------------
+class _Win32ResizeHook:
+    """Subclasses the toplevel's WndProc to expose true resize-start /
+    resize-end signals that Tk has no access to. Windows-only."""
+
+    WM_ENTERSIZEMOVE = 0x0231
+    WM_EXITSIZEMOVE = 0x0232
+    GWLP_WNDPROC = -4
+    
+    def __init__(self, tk_root, on_enter=None, on_exit=None):
+        self._on_enter = on_enter
+        self._on_exit = on_exit
+
+        user32 = ctypes.windll.user32
+        tk_root.update()
+        self.hwnd = wintypes.HWND(ctypes.windll.user32.GetParent(tk_root.winfo_id()))
+
+        # LRESULT/LONG_PTR are pointer-sized (8 bytes on x64) - getting this
+        # wrong is the #1 way this kind of code crashes silently on 64-bit.
+        LRESULT = ctypes.c_ssize_t
+        self.WNDPROC = ctypes.WINFUNCTYPE(
+            LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+        # *Ptr variants are required for 64-bit safety; 32-bit Python has no
+        # SetWindowLongPtrW, so fall back to SetWindowLongW there.
+        self._set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        self._set_wndproc.restype = ctypes.c_void_p
+        self._set_wndproc.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+
+        self._call_wndproc = user32.CallWindowProcW
+        self._call_wndproc.restype = LRESULT
+        self._call_wndproc.argtypes = [
+            ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+        # Keep this reference alive for the hook's lifetime - if the ctypes
+        # callback object gets garbage collected, Windows will eventually
+        # call into freed memory and hard-crash the process.
+        self._new_proc = self.WNDPROC(self._wnd_proc)
+        self._old_proc = self._set_wndproc(
+            self.hwnd, self.GWLP_WNDPROC, ctypes.cast(self._new_proc, ctypes.c_void_p))
+
+    def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        if msg == self.WM_ENTERSIZEMOVE:
+            self._on_enter()
+        elif msg == self.WM_EXITSIZEMOVE:
+            self._on_exit()
+        return self._call_wndproc(self._old_proc, hwnd, msg, wparam, lparam)
+
+    def uninstall(self):
+        """Restore the original WndProc. Call this before the Tk window is
+        destroyed - otherwise Windows can call into a dead Python callback
+        during teardown and crash on exit."""
+        if self._old_proc is not None:
+            self._set_wndproc(self.hwnd, self.GWLP_WNDPROC, self._old_proc)
+            self._old_proc = None
+
 # ---------------------------------------------------------------------------
 # Editor UI
 # ---------------------------------------------------------------------------
@@ -285,22 +344,26 @@ _THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
 THUMB_SIZE = 384
 PREVIEW_SIZE = 1024
 
-
 class CardCropEditor:
     def __init__(self, args):
         self.args = args
         self.last_steps = None
         self.current_img = None
         self.action = None
-        self.photo_refs = {}
+        self._photo_references = {}
         self._preview_win = None
         self._preview_img_lbl = None
         self._preview_photo = None
         self._preview_key = None
+        self._resize_hook = None
+        self._resizePending = False
+        self._resizing = False
+        self._was_resizing = False
 
         self.root = tk.Tk()
         self.root.title("Card Crop Editor")
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
+        self.root.minsize(1024, 600)
         self._wait_var = tk.IntVar(value=0)
 
         self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
@@ -317,14 +380,54 @@ class CardCropEditor:
         self._build_controls()
         self._build_viewports()
 
-    # -- layout -------------------------------------------------------
-    def _make_slider_group(self, parent, title, var, frm, to):
-        """A labeled box containing a value readout and a working slider,
-        stacked vertically with pack() so nothing overlaps."""
-        box = ttk.LabelFrame(parent, text=title, padding=6)
+        self.root.update_idletasks()
+        
+        self._resize_hook = _Win32ResizeHook(self.root, on_enter=self._on_resize_begin, on_exit=self._on_resize_end)        
+        self._start_resize_watcher()
 
-        val_lbl = ttk.Label(box, text=str(var.get()), width=4)
-        val_lbl.pack(side=tk.TOP, anchor='w')
+    def _on_resize_begin(self):
+        self._resizing = True
+
+    def _on_resize_end(self):
+        self._resizing = False
+        
+    def _start_resize_watcher(self):
+        self._was_resizing = False
+        self._poll_resize_state()
+
+    def _poll_resize_state(self):
+        # Two distinct "settled" cases:
+        #  - interactive border drag just ended (WM_ENTERSIZEMOVE/EXITSIZEMOVE
+        #    flip self._resizing, caught here as a False->True->False edge)
+        #  - a non-drag geometry change (maximize/restore/snap) - no
+        #    enter/exit around those, just ordinary <Configure> events on
+        #    the canvases, which set _resizePending
+        # Both are gated on `not self._resizing` so nothing renders mid-drag.
+        settled_from_drag = self._was_resizing and not self._resizing
+        if not self._resizing and (settled_from_drag or self._resizePending):
+            self._resizePending = False
+            for key in self.panel_labels:
+                self._render_viewport(key)
+        self._was_resizing = self._resizing
+        self.root.after(50, self._poll_resize_state)
+    
+    def close(self):
+        if self._resize_hook is not None:
+            self._resize_hook.uninstall()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+                
+    # -- layout -------------------------------------------------------
+    def _add_slider_row(self, parent, row, title, var, frm, to):
+        """One compact grid row inside a group box: short label | live
+        value readout | horizontal slider filling the remaining width."""
+        ttk.Label(parent, text=title, width=8, anchor='w').grid(
+            row=row, column=0, sticky='w', padx=(0, 2), pady=1)
+
+        val_lbl = ttk.Label(parent, text=str(var.get()), width=2, anchor='e')
+        val_lbl.grid(row=row, column=1, sticky='e', padx=(0, 2), pady=1)
 
         def on_move(v, var=var, val_lbl=val_lbl):
             var.set(int(float(v)))
@@ -333,23 +436,22 @@ class CardCropEditor:
         def on_release(event):
             self._schedule_recompute()
 
-        scale = ttk.Scale(box, from_=frm, to=to, orient=tk.HORIZONTAL,
-                           command=on_move, length=150)
+        scale = ttk.Scale(parent, from_=frm, to=to, orient=tk.HORIZONTAL, command=on_move)
         scale.set(var.get())
         scale.bind('<ButtonRelease-1>', on_release)
         scale.bind('<KeyRelease>', on_release)  # arrow-key nudges, not just mouse drag
-        scale.pack(side=tk.TOP, fill=tk.X)
-        return box
+        scale.grid(row=row, column=2, sticky='ew', pady=1)
 
-    def _make_threshold_type_group(self, parent):
+    def _add_threshold_type_row(self, parent, row):
         """Dropdown for the cv2.threshold `type` argument, showing the enum
         name (and the black/white-background hint) instead of a raw int."""
-        box = ttk.LabelFrame(parent, text="Threshold - Type", padding=6)
+        ttk.Label(parent, text="Type", width=6, anchor='w').grid(
+            row=row, column=0, sticky='w', padx=(0, 4), pady=1)
 
-        combo = ttk.Combobox(box, textvariable=self.threshold_type_label_var,
+        combo = ttk.Combobox(parent, textvariable=self.threshold_type_label_var,
                               values=[label for _, label in THRESHOLD_TYPES],
-                              state='readonly', width=26)
-        combo.pack(side=tk.TOP, fill=tk.X)
+                              state='readonly')
+        combo.grid(row=row, column=1, columnspan=2, sticky='ew', pady=1)
 
         def on_select(event):
             self.threshold_type_var.set(
@@ -357,46 +459,58 @@ class CardCropEditor:
             self._schedule_recompute()
 
         combo.bind('<<ComboboxSelected>>', on_select)
-        return box
+
+    def _set_filename(self, name):
+        self._current_filename = name
+        self._update_header()
+
+    def _set_status(self, text):
+        self._current_status = text
+        self._update_header()
+
+    def _update_header(self):
+        self.header_var.set(f"File: {self._current_filename}    Status: {self._current_status}")
 
     def _build_controls(self):
-        top = ttk.Frame(self.root, padding=(8,0,0,0))
+        top = ttk.Frame(self.root, padding=(8, 4, 8, 4))
         top.pack(side=tk.TOP, fill=tk.X)
 
-        self.filename_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.filename_var, font=('', 11, 'bold')).pack(
-            side=tk.TOP, anchor='w', pady=(0, 6))
+        self._current_filename = ""
+        self._current_status = ""
+        self.header_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.header_var, font=('', 11, 'bold')).pack(
+            side=tk.TOP, anchor='w', pady=(0, 4))
 
-        controls_row = ttk.Frame(top)
-        controls_row.pack(side=tk.TOP, fill=tk.X)
+        groups_row = ttk.Frame(top)
+        groups_row.pack(side=tk.TOP, fill=tk.X)
 
-        self._make_slider_group(controls_row, "Threshold - Value",
-                                 self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_threshold_type_group(controls_row).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Levels - Black",
-                                 self.levels_black_var, 0, 254).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Levels - White",
-                                 self.levels_white_var, 1, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Blur kernel",
-                                 self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Padding",
-                                 self.pad_var, 0, 60).pack(side=tk.LEFT, padx=(0, 8))
+        threshold_box = ttk.LabelFrame(groups_row, text="Threshold", padding=6)
+        threshold_box.columnconfigure(2, weight=1)
+        self._add_slider_row(threshold_box, 0, "Value", self.threshold_val_var, 0, 255)
+        self._add_threshold_type_row(threshold_box, 1)
+        self._add_slider_row(threshold_box, 2, "Blur", self.blur_var, 1, 25)
+        threshold_box.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
 
-        deskew_box = ttk.LabelFrame(controls_row, text="Deskew", padding=6)
-        ttk.Checkbutton(deskew_box, text="Enabled", variable=self.deskew,
-                         command=self._schedule_recompute).pack(side=tk.TOP, anchor='w')
-        deskew_box.pack(side=tk.LEFT, padx=(0, 8))
+        levels_box = ttk.LabelFrame(groups_row, text="Levels", padding=6)
+        levels_box.columnconfigure(2, weight=1)
+        self._add_slider_row(levels_box, 0, "White", self.levels_white_var, 1, 255)
+        self._add_slider_row(levels_box, 1, "Black", self.levels_black_var, 0, 254)
+        levels_box.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
 
-        btns = ttk.Frame(controls_row)
-        btns.pack(side=tk.LEFT, padx=(20, 0))
+        output_box = ttk.LabelFrame(groups_row, text="Output", padding=6)
+        output_box.columnconfigure(2, weight=1)
+        self._add_slider_row(output_box, 0, "Padding", self.pad_var, 0, 60)
+        ttk.Checkbutton(output_box, text="Deskew", variable=self.deskew,
+                         command=self._schedule_recompute).grid(
+            row=1, column=0, columnspan=3, sticky='w', pady=1)
+        output_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        btns = ttk.Frame(top)
+        btns.pack(side=tk.TOP, anchor='w', pady=(4, 0))
         ttk.Button(btns, text="Reset", command=self._on_reset).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Skip (n)", command=self._on_skip).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Save (s)", command=self._on_save).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Quit (q)", command=self._on_quit).pack(side=tk.LEFT, padx=2)
-
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(self.root, textvariable=self.status_var, padding=(8, 0, 8, 6)).pack(
-            side=tk.TOP, fill=tk.X)
 
         self.root.bind('<s>', lambda e: self._on_save())
         self.root.bind('<n>', lambda e: self._on_skip())
@@ -410,26 +524,73 @@ class CardCropEditor:
         cols = 3
         for i, (key, title) in enumerate(DISPLAY_STEPS):
             r, c = divmod(i, cols)
+            grid_frame.rowconfigure(r, weight=1)
+            grid_frame.columnconfigure(c, weight=1)
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
-            cell.grid(row=r, column=c, padx=4, pady=4)
-            ttk.Label(cell, text=title, font=('', 9, 'bold')).pack(side=tk.TOP)
-            img_lbl = ttk.Label(cell, cursor="hand2")
-            img_lbl.pack(side=tk.TOP)
-            img_lbl.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
-            self.panel_labels[key] = img_lbl
+            cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
+            cell.rowconfigure(0, weight=0)  # Title row stays compact
+            cell.rowconfigure(1, weight=1)  # Canvas takes remaining space
+            cell.columnconfigure(0, weight=1)
+            title_lbl = ttk.Label(cell, text=title, font=('', 9, 'bold'), anchor='center')
+            title_lbl.grid(row=0, column=0, sticky="ew")
+            canvas = tk.Canvas( cell, width=1, height=1, highlightthickness=0, bd=0, cursor="hand2" )
+            canvas.grid(row=1, column=0, sticky="nsew")
+            canvas.bind("<Configure>", lambda event, k=key: self._on_viewport_configure(event, k))
+            canvas.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
+            self.panel_labels[key] = canvas
 
+    def _on_viewport_configure(self, event, key):
+        """Triggers a clean re-render using a guaranteed, explicitly passed key."""
+        # 1. Ignore early structural layout calculations
+        if event.width < 10 or event.height < 10:
+            return
+
+        self._resizePending = True
+        
     # -- image conversion ----------------------------------------------
-    def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE):
+    def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE, size=None):
+        # 1. Handle missing or empty images using basic Pillow layout placeholders
         if bgr_img is None or bgr_img.size == 0:
-            pil = Image.new('RGB', (max_dim, int(max_dim * 0.7)), (50, 50, 50))
+            tgt_w, tgt_h = size if size else (max_dim, max_dim)
+            pil = Image.new('RGB', (tgt_w, tgt_h), (50, 50, 50))
             if placeholder_text:
                 d = ImageDraw.Draw(pil)
                 d.text((10, 10), placeholder_text, fill=(255, 80, 80))
             return ImageTk.PhotoImage(pil)
-        rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
+        # 2. Extract dimensions directly from the raw NumPy shape tuple
+        # OpenCV shape returns (height, width, channels)
+        src_h, src_w = bgr_img.shape[:2]
+
+        if size is not None:
+            canvas_w, canvas_h = size
+
+            # Calculate fast float scaling vectors
+            ratio_w = canvas_w / src_w
+            ratio_h = canvas_h / src_h
+            scale = min(ratio_w, ratio_h)
+
+            # Round down to valid integer dimensions
+            tgt_w = max(1, int(src_w * scale))
+            tgt_h = max(1, int(src_h * scale))
+
+            # --- OPTIMIZED OPENCV RESIZE INTERPOLATION ---
+            # cv2.INTER_AREA is best for downscaling; cv2.INTER_LINEAR is fastest for upscaling
+            interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            resized_bgr = cv2.resize(bgr_img, (tgt_w, tgt_h), interpolation=interp)
+        else:
+            # Fallback scaling rule using max_dim constraints via cv2
+            scale = max_dim / max(src_w, src_h)
+            if scale < 1.0:
+                resized_bgr = cv2.resize(bgr_img, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            else:
+                resized_bgr = bgr_img
+
+        # 3. Final Conversion pass directly to Tkinter layout asset
+        rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        pil.thumbnail((max_dim, max_dim))
         return ImageTk.PhotoImage(pil)
+
 
     # -- click-to-zoom preview -------------------------------------------
     def _ensure_preview_window(self):
@@ -461,6 +622,23 @@ class CardCropEditor:
         self._preview_photo = photo  # keep reference alive
         self._preview_win.title(f"Preview - {title}")
         self._preview_img_lbl.config(image=photo)
+    
+    def _render_viewport(self, key):
+        arr = self.last_steps.get(key) if self.last_steps else None
+        canvas = self.panel_labels.get(key)
+        
+        if canvas:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            
+            canvas.delete("all")
+
+            photo = self._to_photo(arr, "N/A" if arr is None else None, size=(w, h))
+            
+            self._photo_references[key] = photo
+            
+            canvas.create_image( w // 2, h // 2, image=photo, anchor="center", tags="preview_img" )
+
 
     def _show_preview(self, key):
         self._preview_key = key
@@ -494,18 +672,14 @@ class CardCropEditor:
         self.last_steps = steps
 
         for key, _title in DISPLAY_STEPS:
-            arr = steps.get(key)
-            placeholder = "N/A" if arr is None else None
-            photo = self._to_photo(arr, placeholder)
-            self.photo_refs[key] = photo  # keep reference alive
-            self.panel_labels[key].configure(image=photo)
+            self._render_viewport(key)
 
         self._refresh_preview_if_open()
 
         if steps.get('error'):
-            self.status_var.set(steps['error'])
+            self._set_status(steps['error'])
         else:
-            self.status_var.set("Status: OK")
+            self._set_status("OK")
 
     # -- button handlers ----------------------------------------------
     def _on_reset(self):
@@ -522,7 +696,7 @@ class CardCropEditor:
 
     def _on_save(self):
         if not self.last_steps or self.last_steps.get('roi') is None:
-            self.status_var.set("Cannot save - no crop detected. Adjust sliders first.")
+            self._set_status("Cannot save - no crop detected. Adjust sliders first.")
             return
         self.action = 'save'
         self._release()
@@ -545,8 +719,8 @@ class CardCropEditor:
         holds the crop to write out."""                    
         self.current_img = path
         self.action = None
-        self.filename_var.set(os.path.basename(path))
-        self.status_var.set("")
+        self._set_filename(os.path.basename(path))
+        self._set_status("")
         self._hide_preview()
         self._recompute()
         self.root.wait_variable(self._wait_var)
