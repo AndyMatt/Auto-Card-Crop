@@ -165,11 +165,8 @@ def ProcessFile(input, settings):
 	leveled = apply_levels(img, settings["levels_black"], settings["levels_white"])
 	steps['leveled'] = leveled
 
-	##Blur source image to remove artifacts
+	##Blur & Desaturate source image to remove artifacts & better to find contours
 	blurred = cv2.blur(leveled, (settings["blur_strength"],settings["blur_strength"]))
-	steps['blurred'] = blurred
-    
-	##Desaturate Source to make it easier to find contours
 	imgray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
 	
 	##Change the threshold of the levels to produce simple geometry
@@ -313,7 +310,6 @@ def output_path_for(input_path, outdir):
 DISPLAY_STEPS = [
     ('source',              'Original'),
     ('leveled',             'Levels'),
-    ('blurred',             'Downsample/Blurred'),
     ('threshhold_preview',  'Threshold'),
     ('detected_bounds',     'Detected Boundary'),
     ('crop_preview',        'Crop Preview'),
