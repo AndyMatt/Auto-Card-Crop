@@ -171,7 +171,7 @@ def ProcessFile(input, settings):
 	
 	##Change the threshold of the levels to produce simple geometry
 	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
-	steps['threshhold_preview'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
+	steps['threshhold_preview'] = threshed
     
     ##Collect White Pixels to calculate angle and area
 	white_pixels = np.argwhere(threshed > 0)
@@ -197,7 +197,7 @@ def ProcessFile(input, settings):
 		box = np.intp(cv2.boxPoints(rect))
     
     #Draw Previews
-	threshold_crop_previw = threshed.copy()
+	threshold_crop_previw = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
 	cv2.drawContours(threshold_crop_previw, [np.int64(box)], 0, (0, 0, 255), 3)
 	steps['detected_bounds'] = threshold_crop_previw
 
