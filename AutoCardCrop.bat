@@ -1,13 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
-echo Checking Python
+echo Checking if Python Python is Installed.
 call :DOES_PYTHON_EXIST
 call :CHECK_DEPENDENCIES
 python AutoCardCrop.py
 goto :EOF
 
 :DOES_PYTHON_EXIST
-echo Checking if Python Exists
 py --version >NUL 2>NUL
 if errorlevel 1 (
 echo Python is not installed on your system.
@@ -22,13 +21,16 @@ set "PATH=C:\Python\Python311\;C:\Python\Python311\Scripts\;%PATH%"
 exit /b
 
 :CHECK_DEPENDENCIES
-call :check_install "import cv2" OpenCV-Python
-call :check_install "from PIL import Image" Pillow
-call :check_install "import numpy" NumPy
+echo Checking Dependencies...
+python -c "import cv2; from PIL import Image; import numpy" >nul 2>nul
+if !errorlevel! neq 0 (
+    call :check_install "import cv2" OpenCV-Python
+    call :check_install "from PIL import Image" Pillow
+    call :check_install "import numpy" NumPy
+)
 exit /b
 
 :check_install
-echo Checking for %~2...
 python -c "%~1" >nul 2>nul
 if !errorlevel! neq 0 (
     echo %~2 Not Found. Installing now...
