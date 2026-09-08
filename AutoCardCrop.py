@@ -190,7 +190,6 @@ def ProcessFile(input, settings):
 	##Calculate a bounding box
 	if (settings["deskew"] and len(approx_corners) == 4):
 		box = approx_corners.reshape(4, 2)
-		print("skewing")
 	else:
 	# Fallback to standard bounding box if shape is too noisy
 		rect = cv2.minAreaRect(pts)
