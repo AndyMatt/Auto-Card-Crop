@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 echo Checking Python
 call :DOES_PYTHON_EXIST
 call :CHECK_DEPENDENCIES
-python Rotate.py
+python AutoCardCrop.py
 goto :EOF
 
 :DOES_PYTHON_EXIST
