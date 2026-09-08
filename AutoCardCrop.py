@@ -66,16 +66,7 @@ def order_points(pts):
 
   return rect
   
-def perspectiveTransform(pts, img, padding, skew):
-    pts_src = order_points(pts)
-
-    # Push each source corner outward along the direction from center to that corner
-    center = pts_src.mean(axis=0)
-    directions = pts_src - center
-    norms = np.linalg.norm(directions, axis=1, keepdims=True)
-    unit_dirs = directions / norms
-    pts_src = (pts_src + unit_dirs * padding)
-    
+def perspectiveTransform(pts_src, img, skew):
     if not skew:
         # Axis-aligned bounding box of the padded points
         x_min, y_min = pts_src.min(axis=0)
@@ -114,6 +105,16 @@ def perspectiveTransform(pts, img, padding, skew):
 
     M = cv2.getPerspectiveTransform(pts_src, pts_dst)
     return cv2.warpPerspective(img, M, (max_width, max_height))
+
+def pad_corners(pts, padding):
+    pts_src = order_points(pts)
+
+    center = pts_src.mean(axis=0)
+    directions = pts_src - center
+    norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    unit_dirs = directions / norms
+    return pts_src + unit_dirs * padding
+
     
 # ---------------------------------------------------------------------------
 # Image Functions
@@ -195,16 +196,20 @@ def ProcessFile(input, settings):
 		rect = cv2.minAreaRect(pts)
 		box = np.intp(cv2.boxPoints(rect))
     
+	##Apply padding once so the previews and the final crop agree
+	padded_box = pad_corners(box, settings["border_padding"])
+	padded_box_draw = np.intp(padded_box)
+
     #Draw Previews
 	threshold_crop_previw = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
-	cv2.drawContours(threshold_crop_previw, [np.int64(box)], 0, (0, 0, 255), 3)
+	cv2.drawContours(threshold_crop_previw, [padded_box_draw], 0, (0, 0, 255), 3)
 	steps['detected_bounds'] = threshold_crop_previw
 
 	source_crop_preview = img.copy()
-	cv2.drawContours(source_crop_preview, [np.int64(box)], 0, (0, 0, 255), 3)
+	cv2.drawContours(source_crop_preview, [padded_box_draw], 0, (0, 0, 255), 3)
 	steps['crop_preview'] = source_crop_preview
 
-	steps['result'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
+	steps['result'] = perspectiveTransform(padded_box, img, settings["deskew"])
 	return steps
     
 # ---------------------------------------------------------------------------
