@@ -433,11 +433,13 @@ class CardCropEditor:
         cols = 3
         for i, (key, title) in enumerate(DISPLAY_STEPS):
             r, c = divmod(i, cols)
+            grid_frame.rowconfigure(r, weight=1)
+            grid_frame.columnconfigure(c, weight=1)
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
-            cell.grid(row=r, column=c, padx=4, pady=4)
+            cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
             ttk.Label(cell, text=title, font=('', 9, 'bold')).pack(side=tk.TOP)
             img_lbl = ttk.Label(cell, cursor="hand2")
-            img_lbl.pack(side=tk.TOP)
+            img_lbl.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
             img_lbl.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
             self.panel_labels[key] = img_lbl
 
