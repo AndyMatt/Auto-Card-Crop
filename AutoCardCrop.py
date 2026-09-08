@@ -49,37 +49,22 @@ Usage:
 # Calculations
 # ---------------------------------------------------------------------------
 
-#Orders 4 points in the sequence: top-left, top-right, bottom-right,bottom-left.
-def order_points(pts):
-  pts = np.array(pts, dtype="float32")
+def rotateCrop(pts_src, img):
+    pts_src = pts_src.astype("float32")
+    (tl, tr, br, bl) = pts_src
 
-  # Top-left has smallest sum, bottom-right has largest sum
-  s = pts.sum(axis=1)
-  rect = np.zeros((4, 2), dtype="float32")
-  rect[0] = pts[np.argmin(s)]
-  rect[2] = pts[np.argmax(s)]
+    angle = np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0]))
+    center = tuple(pts_src.mean(axis=0))
+    width = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+    height = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
 
-  # Top-right has smallest difference, bottom-left has largest difference
-  diff = np.diff(pts, axis=1)
-  rect[1] = pts[np.argmin(diff)]
-  rect[3] = pts[np.argmax(diff)]
+    h, w = img.shape[:2]
+    rotated = cv2.warpAffine(img, cv2.getRotationMatrix2D(center, angle, 1.0), (w, h))
+    return cv2.getRectSubPix(rotated, (width, height), center)
 
-  return rect
-  
 def perspectiveTransform(pts_src, img, skew):
     if not skew:
-        # Axis-aligned bounding box of the padded points
-        x_min, y_min = pts_src.min(axis=0)
-        x_max, y_max = pts_src.max(axis=0)
-
-        # Clamp to image bounds
-        h, w = img.shape[:2]
-        x_min = int(max(0, np.floor(x_min)))
-        y_min = int(max(0, np.floor(y_min)))
-        x_max = int(min(w, np.ceil(x_max)))
-        y_max = int(min(h, np.ceil(y_max)))
-
-        return img[y_min:y_max, x_min:x_max]
+        return rotateCrop(pts_src, img)
 
     pts_src = pts_src.astype("float32")
     (tl, tr, br, bl) = pts_src
@@ -105,39 +90,31 @@ def perspectiveTransform(pts_src, img, skew):
 
     M = cv2.getPerspectiveTransform(pts_src, pts_dst)
     return cv2.warpPerspective(img, M, (max_width, max_height))
-
+    
 def pad_corners(pts, padding):
-    pts_src = order_points(pts)
-
-    center = pts_src.mean(axis=0)
-    directions = pts_src - center
+    pts = np.array(pts, dtype="float32")
+ 
+    # Top-left has smallest sum, bottom-right has largest sum
+    s = pts.sum(axis=1)
+    rect = np.zeros((4, 2), dtype="float32")
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+ 
+    # Top-right has smallest difference, bottom-left has largest difference
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+ 
+    center = rect.mean(axis=0)
+    directions = rect - center
     norms = np.linalg.norm(directions, axis=1, keepdims=True)
     unit_dirs = directions / norms
-    return pts_src + unit_dirs * padding
-
+    return rect + unit_dirs * padding
     
 # ---------------------------------------------------------------------------
 # Image Functions
 # ---------------------------------------------------------------------------
- 
-def RotateImage(img, angle):
-	(h,w) = img.shape[:2]
-	(cX, cY) = (w // 2, h // 2)
-
-	M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
-	
-	cos = np.abs(M[0, 0])
-	sin = np.abs(M[0, 1])
-	width = int((h * sin) + (w * cos))
-	height = int((h * cos) + (w * sin))
-
-	#Recalculate Matrix
-	M[0, 2] += (width / 2) - cX
-	M[1, 2] += (height / 2) - cY
-
-	result = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-	return result
-    
+     
 def apply_levels(img, black, white):
     """Photoshop-style black/white point stretch: maps `black` -> 0 and
     `white` -> 255 (clipping anything outside that range), to boost
