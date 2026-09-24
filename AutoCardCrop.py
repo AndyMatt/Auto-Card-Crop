@@ -720,7 +720,7 @@ class CardCropEditor:
         self._recompute()
 
     def _on_save(self):
-        if not self.last_steps or self.last_steps.get('roi') is None:
+        if not self.last_steps or self.last_steps.get('result') is None:
             self._set_status("Cannot save - no crop detected. Adjust sliders first.")
             return
         self.action = 'save'
@@ -804,13 +804,13 @@ def main():
             else:
                 steps = ProcessFile(f, settings)
                 
-            roi = steps.get('roi')
-            if roi is None:
+            result = steps.get('result')
+            if result is None:
                 print(f"Failed to detect card bounds in {f}, skipping. ({steps.get('error')})")
                 continue
 				
             out = output_path_for(f, args.outdir)
-            cv2.imwrite(out, roi)
+            cv2.imwrite(out, result)
             print(f"Saved {out}")
     finally:
         if editor:
