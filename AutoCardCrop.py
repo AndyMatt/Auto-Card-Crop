@@ -373,7 +373,6 @@ class CardCropEditor:
         self.last_steps = None
         self.current_img = None
         self.action = None
-        self.photo_refs = {}
         self._photo_references = {}
         self._preview_win = None
         self._preview_img_lbl = None
@@ -684,32 +683,9 @@ class CardCropEditor:
             self.deskew.get())
         steps = ProcessFile(self.current_img, ui_settings)
         self.last_steps = steps
-        
+
         for key, _title in DISPLAY_STEPS:
-            arr = steps.get(key)
-            placeholder = "N/A" if arr is None else None
-            photo = self._to_photo(arr, placeholder)
-            self.photo_refs[key] = photo  # keep reference alive
-            canvas = self.panel_labels[key]
-            if canvas:
-                # Clear any previous images drawn on this canvas frame
-                canvas.delete("all")
-
-                w = canvas.winfo_width()
-                h = canvas.winfo_height()
-
-                if w <= 1 or h <= 1:
-                    w, h = 200, 200 
-
-                # Draw the image positioned exactly at the center of the canvas
-                # "anchor='center'" acts like .NET's Center alignment profile
-                canvas.create_image(
-                    w // 2, 
-                    h // 2, 
-                    image=photo, 
-                    anchor="center",
-                    tags="preview_img"
-                )
+            self._render_viewport(key)
 
         self._refresh_preview_if_open()
 
