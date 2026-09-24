@@ -51,20 +51,22 @@ Usage:
 # Calculations
 # ---------------------------------------------------------------------------
 
+def rotateCrop(pts_src, img):
+    pts_src = pts_src.astype("float32")
+    (tl, tr, br, bl) = pts_src
+
+    angle = np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0]))
+    center = tuple(pts_src.mean(axis=0))
+    width = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+    height = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+
+    h, w = img.shape[:2]
+    rotated = cv2.warpAffine(img, cv2.getRotationMatrix2D(center, angle, 1.0), (w, h))
+    return cv2.getRectSubPix(rotated, (width, height), center)
+
 def perspectiveTransform(pts_src, img, skew):
     if not skew:
-        # Axis-aligned bounding box of the padded points
-        x_min, y_min = pts_src.min(axis=0)
-        x_max, y_max = pts_src.max(axis=0)
-
-        # Clamp to image bounds
-        h, w = img.shape[:2]
-        x_min = int(max(0, np.floor(x_min)))
-        y_min = int(max(0, np.floor(y_min)))
-        x_max = int(min(w, np.ceil(x_max)))
-        y_max = int(min(h, np.ceil(y_max)))
-
-        return img[y_min:y_max, x_min:x_max]
+        return rotateCrop(pts_src, img)
 
     pts_src = pts_src.astype("float32")
     (tl, tr, br, bl) = pts_src
