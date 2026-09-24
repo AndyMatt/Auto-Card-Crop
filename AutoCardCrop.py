@@ -443,13 +443,14 @@ class CardCropEditor:
             pass
                 
     # -- layout -------------------------------------------------------
-    def _make_slider_group(self, parent, title, var, frm, to):
-        """A labeled box containing a value readout and a working slider,
-        stacked vertically with pack() so nothing overlaps."""
-        box = ttk.LabelFrame(parent, text=title, padding=6)
+    def _add_slider_row(self, parent, row, title, var, frm, to):
+        """One compact grid row inside a group box: short label | live
+        value readout | horizontal slider filling the remaining width."""
+        ttk.Label(parent, text=title, width=8, anchor='w').grid(
+            row=row, column=0, sticky='w', padx=(0, 2), pady=1)
 
-        val_lbl = ttk.Label(box, text=str(var.get()), width=4)
-        val_lbl.pack(side=tk.TOP, anchor='w')
+        val_lbl = ttk.Label(parent, text=str(var.get()), width=2, anchor='e')
+        val_lbl.grid(row=row, column=1, sticky='e', padx=(0, 2), pady=1)
 
         def on_move(v, var=var, val_lbl=val_lbl):
             var.set(int(float(v)))
@@ -458,23 +459,22 @@ class CardCropEditor:
         def on_release(event):
             self._schedule_recompute()
 
-        scale = ttk.Scale(box, from_=frm, to=to, orient=tk.HORIZONTAL,
-                           command=on_move, length=150)
+        scale = ttk.Scale(parent, from_=frm, to=to, orient=tk.HORIZONTAL, command=on_move)
         scale.set(var.get())
         scale.bind('<ButtonRelease-1>', on_release)
         scale.bind('<KeyRelease>', on_release)  # arrow-key nudges, not just mouse drag
-        scale.pack(side=tk.TOP, fill=tk.X)
-        return box
+        scale.grid(row=row, column=2, sticky='ew', pady=1)
 
-    def _make_threshold_type_group(self, parent):
+    def _add_threshold_type_row(self, parent, row):
         """Dropdown for the cv2.threshold `type` argument, showing the enum
         name (and the black/white-background hint) instead of a raw int."""
-        box = ttk.LabelFrame(parent, text="Threshold - Type", padding=6)
+        ttk.Label(parent, text="Type", width=6, anchor='w').grid(
+            row=row, column=0, sticky='w', padx=(0, 4), pady=1)
 
-        combo = ttk.Combobox(box, textvariable=self.threshold_type_label_var,
+        combo = ttk.Combobox(parent, textvariable=self.threshold_type_label_var,
                               values=[label for _, label in THRESHOLD_TYPES],
-                              state='readonly', width=26)
-        combo.pack(side=tk.TOP, fill=tk.X)
+                              state='readonly')
+        combo.grid(row=row, column=1, columnspan=2, sticky='ew', pady=1)
 
         def on_select(event):
             self.threshold_type_var.set(
@@ -482,46 +482,58 @@ class CardCropEditor:
             self._schedule_recompute()
 
         combo.bind('<<ComboboxSelected>>', on_select)
-        return box
+
+    def _set_filename(self, name):
+        self._current_filename = name
+        self._update_header()
+
+    def _set_status(self, text):
+        self._current_status = text
+        self._update_header()
+
+    def _update_header(self):
+        self.header_var.set(f"File: {self._current_filename}    Status: {self._current_status}")
 
     def _build_controls(self):
-        top = ttk.Frame(self.root, padding=(8,0,0,0))
+        top = ttk.Frame(self.root, padding=(8, 4, 8, 4))
         top.pack(side=tk.TOP, fill=tk.X)
 
-        self.filename_var = tk.StringVar(value="")
-        ttk.Label(top, textvariable=self.filename_var, font=('', 11, 'bold')).pack(
-            side=tk.TOP, anchor='w', pady=(0, 6))
+        self._current_filename = ""
+        self._current_status = ""
+        self.header_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=self.header_var, font=('', 11, 'bold')).pack(
+            side=tk.TOP, anchor='w', pady=(0, 4))
 
-        controls_row = ttk.Frame(top)
-        controls_row.pack(side=tk.TOP, fill=tk.X)
+        groups_row = ttk.Frame(top)
+        groups_row.pack(side=tk.TOP, fill=tk.X)
 
-        self._make_slider_group(controls_row, "Threshold - Value",
-                                 self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_threshold_type_group(controls_row).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Levels - Black",
-                                 self.levels_black_var, 0, 254).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Levels - White",
-                                 self.levels_white_var, 1, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Blur kernel",
-                                 self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Padding",
-                                 self.pad_var, 0, 60).pack(side=tk.LEFT, padx=(0, 8))
+        threshold_box = ttk.LabelFrame(groups_row, text="Threshold", padding=6)
+        threshold_box.columnconfigure(2, weight=1)
+        self._add_slider_row(threshold_box, 0, "Value", self.threshold_val_var, 0, 255)
+        self._add_threshold_type_row(threshold_box, 1)
+        self._add_slider_row(threshold_box, 2, "Blur", self.blur_var, 1, 25)
+        threshold_box.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
 
-        deskew_box = ttk.LabelFrame(controls_row, text="Deskew", padding=6)
-        ttk.Checkbutton(deskew_box, text="Enabled", variable=self.deskew,
-                         command=self._schedule_recompute).pack(side=tk.TOP, anchor='w')
-        deskew_box.pack(side=tk.LEFT, padx=(0, 8))
+        levels_box = ttk.LabelFrame(groups_row, text="Levels", padding=6)
+        levels_box.columnconfigure(2, weight=1)
+        self._add_slider_row(levels_box, 0, "White", self.levels_white_var, 1, 255)
+        self._add_slider_row(levels_box, 1, "Black", self.levels_black_var, 0, 254)
+        levels_box.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
 
-        btns = ttk.Frame(controls_row)
-        btns.pack(side=tk.LEFT, padx=(20, 0))
+        output_box = ttk.LabelFrame(groups_row, text="Output", padding=6)
+        output_box.columnconfigure(2, weight=1)
+        self._add_slider_row(output_box, 0, "Padding", self.pad_var, 0, 60)
+        ttk.Checkbutton(output_box, text="Deskew", variable=self.deskew,
+                         command=self._schedule_recompute).grid(
+            row=1, column=0, columnspan=3, sticky='w', pady=1)
+        output_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        btns = ttk.Frame(top)
+        btns.pack(side=tk.TOP, anchor='w', pady=(4, 0))
         ttk.Button(btns, text="Reset", command=self._on_reset).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Skip (n)", command=self._on_skip).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Save (s)", command=self._on_save).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="Quit (q)", command=self._on_quit).pack(side=tk.LEFT, padx=2)
-
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(self.root, textvariable=self.status_var, padding=(8, 0, 8, 6)).pack(
-            side=tk.TOP, fill=tk.X)
 
         self.root.bind('<s>', lambda e: self._on_save())
         self.root.bind('<n>', lambda e: self._on_skip())
@@ -643,23 +655,13 @@ class CardCropEditor:
             w = canvas.winfo_width()
             h = canvas.winfo_height()
             
-            if w <= 10 or h <= 10:
-                w, h = 200, 200
-
             canvas.delete("all")
 
-            # Passes the absolute viewport bounds down to the ratio calculator
             photo = self._to_photo(arr, "N/A" if arr is None else None, size=(w, h))
             
             self._photo_references[key] = photo
             
-            canvas.create_image(
-                w // 2, 
-                h // 2, 
-                image=photo, 
-                anchor="center",
-                tags="preview_img"
-            )
+            canvas.create_image( w // 2, h // 2, image=photo, anchor="center", tags="preview_img" )
 
 
     def _show_preview(self, key):
@@ -699,9 +701,9 @@ class CardCropEditor:
         self._refresh_preview_if_open()
 
         if steps.get('error'):
-            self.status_var.set(steps['error'])
+            self._set_status(steps['error'])
         else:
-            self.status_var.set("Status: OK")
+            self._set_status("OK")
 
     # -- button handlers ----------------------------------------------
     def _on_reset(self):
@@ -718,7 +720,7 @@ class CardCropEditor:
 
     def _on_save(self):
         if not self.last_steps or self.last_steps.get('roi') is None:
-            self.status_var.set("Cannot save - no crop detected. Adjust sliders first.")
+            self._set_status("Cannot save - no crop detected. Adjust sliders first.")
             return
         self.action = 'save'
         self._release()
@@ -741,8 +743,8 @@ class CardCropEditor:
         holds the crop to write out."""                    
         self.current_img = path
         self.action = None
-        self.filename_var.set(os.path.basename(path))
-        self.status_var.set("")
+        self._set_filename(os.path.basename(path))
+        self._set_status("")
         self._hide_preview()
         self._recompute()
         self.root.wait_variable(self._wait_var)
