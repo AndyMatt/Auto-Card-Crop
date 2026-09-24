@@ -429,7 +429,7 @@ class CardCropEditor:
     def _poll_resize_state(self):
         if self._was_resizing and not self._resizing:
             for key in self.panel_labels:
-                self._render_preview(key)
+                self._render_viewport(key)
         self._was_resizing = self._resizing
         self.root.after(50, self._poll_resize_state)
     
@@ -445,7 +445,7 @@ class CardCropEditor:
         if _resizePending:
             _resizePending = False
             for key in self.panel_labels:
-                self._render_preview(key)
+                self._render_viewport(key)
 
     # -- layout -------------------------------------------------------
     def _make_slider_group(self, parent, title, var, frm, to):
@@ -567,25 +567,6 @@ class CardCropEditor:
         self._viewportHeight = event.height
         self._resizePending = True
         
-    def _on_update_preview(self):
-        if not hasattr(self, 'last_steps') or not self.last_steps:
-            for key in self.panel_labels:
-                canvas = self.panel_labels[key]
-                canvas.delete("all")
-                canvas.create_text(
-                    canvas.winfo_width() // 2,
-                    canvas.winfo_height() // 2,
-                    text="Awaiting Data...",
-                    fill="#888888",
-                    anchor="center"
-                )
-            return
-
-        # Re-render every panel now that the drag has settled
-        for key in self.panel_labels:
-            self._render_preview(key)
-            
-
     def _on_canvas_resize(self, event):
         """Safely resizes the actual image data because canvas layout is locked."""
         canvas = event.widget
@@ -679,6 +660,14 @@ class CardCropEditor:
         self._render_preview(self._preview_key)
 
     def _render_preview(self, key):
+        title = dict(DISPLAY_STEPS).get(key, key)
+        arr = self.last_steps.get(key) if self.last_steps else None
+        photo = self._to_photo(arr, "N/A" if arr is None else None, max_dim=PREVIEW_SIZE)
+        self._preview_photo = photo  # keep reference alive
+        self._preview_win.title(f"Preview - {title}")
+        self._preview_img_lbl.config(image=photo)
+    
+    def _render_viewport(self, key):
         arr = self.last_steps.get(key) if self.last_steps else None
         canvas = self.panel_labels.get(key)
         
@@ -706,11 +695,11 @@ class CardCropEditor:
 
 
     def _show_preview(self, key):
-        #self._preview_key = key
-        #self._ensure_preview_window()
+        self._preview_key = key
+        self._ensure_preview_window()
         self._render_preview(key)
-        #self._preview_win.deiconify()
-        #self._preview_win.lift()
+        self._preview_win.deiconify()
+        self._preview_win.lift()
 
     def _hide_preview(self):
         if self._preview_win is not None:
