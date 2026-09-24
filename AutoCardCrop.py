@@ -550,20 +550,8 @@ class CardCropEditor:
             title_lbl = ttk.Label(cell, text=title, font=('', 9, 'bold'))
             title_lbl.pack(side=tk.TOP)
             cell.pack_propagate(False)
-            debug_panel = tk.Frame(cell, background="magenta", bd=0, highlightthickness=0)
-            debug_panel.grid(row=1, column=0, sticky="nsew")
-            debug_panel.rowconfigure(0, weight=1)
-            debug_panel.columnconfigure(0, weight=1)
-            canvas = tk.Canvas(
-                debug_panel, 
-                width=1, 
-                height=1, 
-                highlightthickness=0, 
-                bd=0, 
-                cursor="hand2",
-                background="#00ff00" 
-            )
-            canvas.grid(row=0, column=0, sticky="nsew")
+            canvas = tk.Canvas( cell, width=1, height=1, highlightthickness=0, bd=0, cursor="hand2" )
+            canvas.grid(row=1, column=0, sticky="nsew")
             canvas.bind("<Configure>", lambda event, k=key: self._on_viewport_configure(event, k))
             canvas.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
             #img_container.bind('<Configure>', self._on_label_resize)
