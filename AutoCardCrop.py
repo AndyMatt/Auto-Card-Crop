@@ -552,11 +552,10 @@ class CardCropEditor:
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
             cell.grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
             cell.rowconfigure(0, weight=0)  # Title row stays compact
-            cell.rowconfigure(1, weight=1)  # Debug container takes remaining space
+            cell.rowconfigure(1, weight=1)  # Canvas takes remaining space
             cell.columnconfigure(0, weight=1)
-            title_lbl = ttk.Label(cell, text=title, font=('', 9, 'bold'))
-            title_lbl.pack(side=tk.TOP)
-            cell.pack_propagate(False)
+            title_lbl = ttk.Label(cell, text=title, font=('', 9, 'bold'), anchor='center')
+            title_lbl.grid(row=0, column=0, sticky="ew")
             canvas = tk.Canvas( cell, width=1, height=1, highlightthickness=0, bd=0, cursor="hand2" )
             canvas.grid(row=1, column=0, sticky="nsew")
             canvas.bind("<Configure>", lambda event, k=key: self._on_viewport_configure(event, k))
