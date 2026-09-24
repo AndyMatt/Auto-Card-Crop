@@ -5,6 +5,8 @@ import os
 import argparse
 import cv2
 import numpy as np
+import ctypes
+from ctypes import wintypes
 
 IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
@@ -281,7 +283,67 @@ def output_path_for(input_path, outdir):
     base = os.path.splitext(os.path.basename(input_path))[0] + '.png'
     directory = outdir if outdir else (os.path.dirname(input_path) or '.')
     return os.path.join(directory, base)
-   
+# ---------------------------------------------------------------------------
+# WND PROC Hooks
+# ---------------------------------------------------------------------------
+class _Win32ResizeHook:
+    """Subclasses the toplevel's WndProc to expose true resize-start /
+    resize-end signals that Tk has no access to. Windows-only."""
+
+    WM_ENTERSIZEMOVE = 0x0231
+    WM_EXITSIZEMOVE = 0x0232
+    GWLP_WNDPROC = -4
+    
+    def __init__(self, tk_root, on_enter=None, on_exit=None):
+        self._on_enter = on_enter
+        self._on_exit = on_exit
+
+        user32 = ctypes.windll.user32
+        tk_root.update()
+        self.hwnd = wintypes.HWND(ctypes.windll.user32.GetParent(tk_root.winfo_id()))
+
+        # LRESULT/LONG_PTR are pointer-sized (8 bytes on x64) - getting this
+        # wrong is the #1 way this kind of code crashes silently on 64-bit.
+        LRESULT = ctypes.c_ssize_t
+        self.WNDPROC = ctypes.WINFUNCTYPE(
+            LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+        # *Ptr variants are required for 64-bit safety; 32-bit Python has no
+        # SetWindowLongPtrW, so fall back to SetWindowLongW there.
+        self._set_wndproc = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        self._set_wndproc.restype = ctypes.c_void_p
+        self._set_wndproc.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+
+        self._call_wndproc = user32.CallWindowProcW
+        self._call_wndproc.restype = LRESULT
+        self._call_wndproc.argtypes = [
+            ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+        # Keep this reference alive for the hook's lifetime - if the ctypes
+        # callback object gets garbage collected, Windows will eventually
+        # call into freed memory and hard-crash the process.
+        self._new_proc = self.WNDPROC(self._wnd_proc)
+        self._old_proc = self._set_wndproc(
+            self.hwnd, self.GWLP_WNDPROC, ctypes.cast(self._new_proc, ctypes.c_void_p))
+
+    def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        #print(f"msg=0x{msg:04X}")
+        if msg == 0x0231:
+            print("Entered size/move loop")
+            self._on_enter()
+        elif msg == 0x0232:
+            print("Exited size/move loop")
+            self._on_exit()
+        return self._call_wndproc(self._old_proc, hwnd, msg, wparam, lparam)
+
+    def uninstall(self):
+        """Restore the original WndProc. Call this before the Tk window is
+        destroyed - otherwise Windows can call into a dead Python callback
+        during teardown and crash on exit."""
+        if self._old_proc is not None:
+            self._set_wndproc(self.hwnd, self.GWLP_WNDPROC, self._old_proc)
+            self._old_proc = None
+
 # ---------------------------------------------------------------------------
 # Editor UI
 # ---------------------------------------------------------------------------
@@ -308,7 +370,6 @@ _THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
 THUMB_SIZE = 384
 PREVIEW_SIZE = 1024
 
-
 class CardCropEditor:
     def __init__(self, args):
         self.args = args
@@ -321,10 +382,17 @@ class CardCropEditor:
         self._preview_img_lbl = None
         self._preview_photo = None
         self._preview_key = None
+        self._viewportWidth = THUMB_SIZE
+        self._viewportHeight = THUMB_SIZE
+        self._resize_hook = None
+        self._resizePending = False
+        self._resizing = False
+        self._was_resizing = False
 
         self.root = tk.Tk()
         self.root.title("Card Crop Editor")
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
+        self.root.minsize(1280, 800)
         self._wait_var = tk.IntVar(value=0)
 
         self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
@@ -342,7 +410,42 @@ class CardCropEditor:
         self._build_viewports()
 
         self.root.update_idletasks()
+        
+        self._resize_hook = _Win32ResizeHook(self.root, on_enter=self._on_resize_begin, on_exit=self._on_resize_end)        
+        self._start_resize_watcher()
+        
         self._initialized = True
+        
+    def _on_resize_begin(self):
+        self._resizing = True
+
+    def _on_resize_end(self):
+        self._resizing = False
+        
+    def _start_resize_watcher(self):
+        self._was_resizing = False
+        self._poll_resize_state()
+
+    def _poll_resize_state(self):
+        if self._was_resizing and not self._resizing:
+            for key in self.panel_labels:
+                self._render_preview(key)
+        self._was_resizing = self._resizing
+        self.root.after(50, self._poll_resize_state)
+    
+    def close(self):
+        if self._resize_hook is not None:
+            self._resize_hook.uninstall()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+                
+    def _refresh_all_previews(self):
+        if _resizePending:
+            _resizePending = False
+            for key in self.panel_labels:
+                self._render_preview(key)
 
     # -- layout -------------------------------------------------------
     def _make_slider_group(self, parent, title, var, frm, to):
@@ -472,28 +575,28 @@ class CardCropEditor:
         if event.width < 10 or event.height < 10:
             return
             
-        # 2. If data is missing or empty, render a placeholder state instead of breaking
-        if not hasattr(self, 'last_steps') or not self.last_steps or key not in self.last_steps:
-            print("recreating vancas")
-            canvas = event.widget
-            # If event.widget returned a string path name, resolve it safely
-            if isinstance(canvas, str):
-                canvas = self.root.nametowidget(canvas)
-                
-            canvas.delete("all")
-            canvas.create_text(
-                event.width // 2, 
-                event.height // 2, 
-                text="Awaiting Data...", 
-                fill="#888888", 
-                anchor="center"
-            )
+        self._viewportWidth = event.height
+        self._viewportHeight = event.height
+        self._resizePending = True
+        
+    def _on_update_preview(self):
+        if not hasattr(self, 'last_steps') or not self.last_steps:
+            for key in self.panel_labels:
+                canvas = self.panel_labels[key]
+                canvas.delete("all")
+                canvas.create_text(
+                    canvas.winfo_width() // 2,
+                    canvas.winfo_height() // 2,
+                    text="Awaiting Data...",
+                    fill="#888888",
+                    anchor="center"
+                )
             return
 
-        # 3. Everything is verified! Trigger your optimal OpenCV rendering function
-        self._render_preview(key)
-
-
+        # Re-render every panel now that the drag has settled
+        for key in self.panel_labels:
+            self._render_preview(key)
+            
 
     def _on_canvas_resize(self, event):
         """Safely resizes the actual image data because canvas layout is locked."""
