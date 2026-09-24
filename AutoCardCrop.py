@@ -386,7 +386,7 @@ class CardCropEditor:
         self.root = tk.Tk()
         self.root.title("Card Crop Editor")
         self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
-        self.root.minsize(1280, 800)
+        self.root.minsize(1024, 600)
         self._wait_var = tk.IntVar(value=0)
 
         self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
@@ -419,7 +419,16 @@ class CardCropEditor:
         self._poll_resize_state()
 
     def _poll_resize_state(self):
-        if self._was_resizing and not self._resizing:
+        # Two distinct "settled" cases:
+        #  - interactive border drag just ended (WM_ENTERSIZEMOVE/EXITSIZEMOVE
+        #    flip self._resizing, caught here as a False->True->False edge)
+        #  - a non-drag geometry change (maximize/restore/snap) - no
+        #    enter/exit around those, just ordinary <Configure> events on
+        #    the canvases, which set _resizePending
+        # Both are gated on `not self._resizing` so nothing renders mid-drag.
+        settled_from_drag = self._was_resizing and not self._resizing
+        if not self._resizing and (settled_from_drag or self._resizePending):
+            self._resizePending = False
             for key in self.panel_labels:
                 self._render_viewport(key)
         self._was_resizing = self._resizing
