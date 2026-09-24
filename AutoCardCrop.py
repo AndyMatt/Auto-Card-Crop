@@ -327,12 +327,9 @@ class _Win32ResizeHook:
             self.hwnd, self.GWLP_WNDPROC, ctypes.cast(self._new_proc, ctypes.c_void_p))
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
-        #print(f"msg=0x{msg:04X}")
-        if msg == 0x0231:
-            print("Entered size/move loop")
+        if msg == self.WM_ENTERSIZEMOVE:
             self._on_enter()
-        elif msg == 0x0232:
-            print("Exited size/move loop")
+        elif msg == self.WM_EXITSIZEMOVE:
             self._on_exit()
         return self._call_wndproc(self._old_proc, hwnd, msg, wparam, lparam)
 
@@ -382,8 +379,6 @@ class CardCropEditor:
         self._preview_img_lbl = None
         self._preview_photo = None
         self._preview_key = None
-        self._viewportWidth = THUMB_SIZE
-        self._viewportHeight = THUMB_SIZE
         self._resize_hook = None
         self._resizePending = False
         self._resizing = False
@@ -413,9 +408,7 @@ class CardCropEditor:
         
         self._resize_hook = _Win32ResizeHook(self.root, on_enter=self._on_resize_begin, on_exit=self._on_resize_end)        
         self._start_resize_watcher()
-        
-        self._initialized = True
-        
+
     def _on_resize_begin(self):
         self._resizing = True
 
@@ -441,12 +434,6 @@ class CardCropEditor:
         except tk.TclError:
             pass
                 
-    def _refresh_all_previews(self):
-        if _resizePending:
-            _resizePending = False
-            for key in self.panel_labels:
-                self._render_viewport(key)
-
     # -- layout -------------------------------------------------------
     def _make_slider_group(self, parent, title, var, frm, to):
         """A labeled box containing a value readout and a working slider,
@@ -554,7 +541,6 @@ class CardCropEditor:
             canvas.grid(row=1, column=0, sticky="nsew")
             canvas.bind("<Configure>", lambda event, k=key: self._on_viewport_configure(event, k))
             canvas.bind('<Button-1>', lambda e, k=key: self._show_preview(k))
-            #img_container.bind('<Configure>', self._on_label_resize)
             self.panel_labels[key] = canvas
 
     def _on_viewport_configure(self, event, key):
@@ -562,35 +548,9 @@ class CardCropEditor:
         # 1. Ignore early structural layout calculations
         if event.width < 10 or event.height < 10:
             return
-            
-        self._viewportWidth = event.height
-        self._viewportHeight = event.height
+
         self._resizePending = True
         
-    def _on_canvas_resize(self, event):
-        """Safely resizes the actual image data because canvas layout is locked."""
-        canvas = event.widget
-        key = getattr(canvas, 'key', None)
-        if not key or not self.last_steps or key not in self.last_steps:
-            return
-
-        # 1. Get the real bounding box of the canvas
-        w, h = event.width, event.height
-        if w <= 10 or h <= 10:
-            return
-
-        # 2. Determine the maximum dimension to fit inside this viewport (accounting for aspect ratio)
-        max_dim = min(w, h)
-
-        # 3. Re-render the image asset at the exact scaled size
-        # (This will NOT trigger another resize event because the canvas size is fixed by the grid)
-        arr = self.last_steps.get(key)
-        photo = self._to_photo(arr, None, max_dim=max_dim)
-        
-        self._photo_references[key] = photo
-        canvas.delete("all")
-        canvas.create_image(w // 2, h // 2, image=photo, anchor="center")
-
     # -- image conversion ----------------------------------------------
     def _to_photo(self, bgr_img, placeholder_text=None, max_dim=THUMB_SIZE, size=None):
         # 1. Handle missing or empty images using basic Pillow layout placeholders
@@ -740,10 +700,7 @@ class CardCropEditor:
 
                 if w <= 1 or h <= 1:
                     w, h = 200, 200 
-                
-                print(w)
-                print(h)
-                
+
                 # Draw the image positioned exactly at the center of the canvas
                 # "anchor='center'" acts like .NET's Center alignment profile
                 canvas.create_image(
@@ -753,9 +710,8 @@ class CardCropEditor:
                     anchor="center",
                     tags="preview_img"
                 )
-            #self.panel_labels[key].configure(image=photo)
 
-       #self._refresh_preview_if_open()
+        self._refresh_preview_if_open()
 
         if steps.get('error'):
             self.status_var.set(steps['error'])
