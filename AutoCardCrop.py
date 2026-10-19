@@ -30,9 +30,9 @@ Arguments:
     [file|files]        - Name of file/files to process
     --dir               - Specify Input directory, '.' is supported.
     --threshhold_thresh - 0-255, Value for threshold strength.
-    --threshhold1_type  - Type of Threshold Method 
-        0: THRESH_BINARY        - Preferable for White Backgrounds
-        1: THRESH_BINARY_INV    - Preferable for Black Backgrounds
+    --threshhold_type  - Type of Threshold Method 
+        0: THRESH_BINARY        - Preferable for Black Backgrounds
+        1: THRESH_BINARY_INV    - Preferable for White Backgrounds
         2: THRESH_TRUNC
         3: THRESH_TOZERO
         4: THRESH_TOZERO_INV
@@ -128,6 +128,22 @@ def apply_levels(img, black, white):
     return np.clip(stretched, 0, 255).astype(np.uint8)
 
 
+def detect_background_threshold_type(img, border_frac=0.01):
+    """Samples a border_frac-thick ring around the image edges and picks
+    the cv2.threshold type that turns the CARD (not the background) white,
+    since that's what ProcessFile's contour search below relies on: a
+    bright background means the card is the darker region -> INV; a dark
+    background means the card is the brighter region -> BINARY."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    bx, by = max(1, int(w * border_frac)), max(1, int(h * border_frac))
+    border_mean = np.mean([
+        gray[:by, :].mean(), gray[-by:, :].mean(),
+        gray[:, :bx].mean(), gray[:, -bx:].mean(),
+    ])
+    return cv2.THRESH_BINARY_INV if border_mean > 127 else cv2.THRESH_BINARY
+
+
 def ProcessFile(input, settings):
 	steps = {'error': None, 'result': None}
 
@@ -138,6 +154,10 @@ def ProcessFile(input, settings):
 		return None
 		
 	steps['source'] = img
+
+	threshhold_type = settings["threshhold_type"]
+	if threshhold_type == AUTO_THRESHOLD_TYPE:
+		threshhold_type = detect_background_threshold_type(img)
 
 	##Levels stretch (black/white point) to help detection on low-contrast
 	##photos - this only feeds the threshold/contour pass below; the final
@@ -150,7 +170,7 @@ def ProcessFile(input, settings):
 	imgray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
 	
 	##Change the threshold of the levels to produce simple geometry
-	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
+	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, threshhold_type)
 	steps['threshhold_preview'] = threshed
     
     ##Collect White Pixels to calculate angle and area
@@ -195,7 +215,7 @@ def ProcessFile(input, settings):
 # Arguments
 # ---------------------------------------------------------------------------
 def build_parser():
-    p = argparse.ArgumentParser(description="Auto-rotate and crop trading card photos (white background).")
+    p = argparse.ArgumentParser(description="Auto-rotate and crop trading card photos.")
     p.add_argument('paths', nargs='*',
                     help='Image file(s), or a directory when -d is used ("." for cwd)')
     p.add_argument('--dir', '--dir', action='store_true',
@@ -204,8 +224,8 @@ def build_parser():
                     help='Open the multi-viewport editor before saving each image')
     p.add_argument('--threshhold_val', type=int, default=120,
                     help='Threshold value - card/angle detection (default: 120)')
-    p.add_argument('--threshhold_type', type=int, default=0,
-                    help='Threshold type, cv2.threshold type constant (default: 0)')
+    p.add_argument('--threshhold_type', type=int, default=AUTO_THRESHOLD_TYPE,
+                    help='Threshold type, cv2.threshold type constant (default: auto-detected from background colour)')
     p.add_argument('--levels_black', type=int, default=0,
                     help='Levels black point, 0-254 (default: 0)')
     p.add_argument('--levels_white', type=int, default=255,
@@ -221,7 +241,7 @@ def build_parser():
 def get_setting_args(args):
     return {
         "threshhold_strength": getattr(args, "threshhold_val", 120),
-        "threshhold1_type": getattr(args, "threshhold_type", 0),
+        "threshhold_type": getattr(args, "threshhold_type", AUTO_THRESHOLD_TYPE),
         "levels_black": getattr(args, "levels_black", 0),
         "levels_white": getattr(args, "levels_white", 255),
         "blur_strength": getattr(args, "blur", 10),
@@ -232,7 +252,7 @@ def get_setting_args(args):
 def create_settings_for_ui(threshhold_val=120, threshhold_type=0, levels_black=0, levels_white=255, blur_size=5, pad=10, deskew=False):
     return {
         "threshhold_strength": threshhold_val,
-        "threshhold1_type": threshhold_type,
+        "threshhold_type": threshhold_type,
         "levels_black": levels_black,
         "levels_white": levels_white,
         "blur_strength": blur_size,
@@ -332,12 +352,14 @@ DISPLAY_STEPS = [
 ]
 
 THRESHOLD_TYPES = [
-    (0, "THRESH_BINARY (White Background)"),
-    (1, "THRESH_BINARY_INV (Black Backgrounf)"),
+    (0, "THRESH_BINARY (Black Background)"),
+    (1, "THRESH_BINARY_INV (White Background)"),
     (2, "THRESH_TRUNC"),
     (3, "THRESH_TOZERO"),
     (4, "THRESH_TOZERO_INV"),
+    (5, "Auto (Detect Background)"),
 ]
+AUTO_THRESHOLD_TYPE = 5  # not a real cv2.threshold code - resolved to 0/1 before use
 _THRESH_TYPE_VALUE_TO_LABEL = {value: label for value, label in THRESHOLD_TYPES}
 _THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
 
@@ -683,10 +705,6 @@ class CardCropEditor:
 
     # -- button handlers ----------------------------------------------
     def _on_reset(self):
-        self.threshold_val_var.set(self.args.threshhold_val)
-        self.threshold_type_var.set(self.args.threshhold_type)
-        self.threshold_type_label_var.set(
-            _THRESH_TYPE_VALUE_TO_LABEL.get(self.args.threshhold_type, THRESHOLD_TYPES[0][1]))
         self.levels_black_var.set(self.args.levels_black)
         self.levels_white_var.set(self.args.levels_white)
         self.blur_var.set(self.args.blur)
