@@ -29,8 +29,8 @@ Arguments:
     --dir               - Specify Input directory, '.' is supported.
     --threshhold_thresh - 0-255, Value for threshold strength.
     --threshhold1_type  - Type of Threshold Method 
-        0: THRESH_BINARY        - Preferable for Black Backgrounds
-        1: THRESH_BINARY_INV    - Preferable for White Backgrounds
+        0: THRESH_BINARY        - Preferable for White Backgrounds
+        1: THRESH_BINARY_INV    - Preferable for Black Backgrounds
         2: THRESH_TRUNC
         3: THRESH_TOZERO
         4: THRESH_TOZERO_INV
@@ -138,7 +138,7 @@ def RotateImage(img, angle):
 	return result
     
 def ProcessFile(input, settings):
-	steps = {'error': None, 'roi': None}
+	steps = {'error': None, 'result': None}
 
 	##Read file as input
 	img = cv2.imread(input)
@@ -146,7 +146,6 @@ def ProcessFile(input, settings):
 		print(f"Skipping {img}: could not read image")
 		return None
 		
-	print(f"Processing {input}")
 	steps['source'] = img
     
 	##Blur source image to remove artifacts
@@ -158,10 +157,7 @@ def ProcessFile(input, settings):
 	
 	##Change the threshold of the levels to produce simple geometry
 	_, threshed = cv2.threshold(imgray, settings["threshhold_strength"], 255, settings["threshhold1_type"])
-	steps['threshhold1_mask'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
-
-	##Find Contours in Source
-	contour_canvas = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
+	steps['threshhold_preview'] = cv2.cvtColor(threshed, cv2.COLOR_GRAY2BGR)
     
     ##Collect White Pixels to calculate angle and area
 	white_pixels = np.argwhere(threshed > 0)
@@ -180,17 +176,21 @@ def ProcessFile(input, settings):
 	##Calculate a bounding box
 	if (settings["deskew"] and len(approx_corners) == 4):
 		box = approx_corners.reshape(4, 2)
-		print("skewing")
 	else:
 	# Fallback to standard bounding box if shape is too noisy
 		rect = cv2.minAreaRect(pts)
 		box = np.intp(cv2.boxPoints(rect))
     
-    #Draw contour overlay
-	cv2.drawContours(contour_canvas, [np.int64(box)], 0, (0, 0, 255), 3)
-	steps['contours_overlay'] = contour_canvas
+    #Draw Previews
+	threshold_crop_previw = threshed.copy()
+	cv2.drawContours(threshold_crop_previw, [np.int64(box)], 0, (0, 0, 255), 3)
+	steps['detected_bounds'] = threshold_crop_previw
 
-	steps['roi'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
+	source_crop_preview = img.copy()
+	cv2.drawContours(source_crop_preview, [np.int64(box)], 0, (0, 0, 255), 3)
+	steps['crop_preview'] = source_crop_preview
+
+	steps['result'] = perspectiveTransform(box,img, settings["border_padding"],settings["deskew"])
 	return steps
     
 # ---------------------------------------------------------------------------
@@ -260,16 +260,25 @@ def output_path_for(input_path, outdir):
 # ---------------------------------------------------------------------------
 
 DISPLAY_STEPS = [
-    ('source',           'Source'),
-    ('blurred',          'Blurred'),
-    ('threshhold1_mask', 'Threshold'),
-    ('contours_overlay', 'Contours + approx'),
-    ('rotated',          'Rotated'),
-    ('box_overlay',      'Bounding box'),
-    ('roi',              'Final crop'),
+    ('source',              'Original'),
+    ('blurred',             'Downsample/Blurred'),
+    ('threshhold_preview',  'Threshold'),
+    ('detected_bounds',     'Detected Boundary'),
+    ('crop_preview',        'Crop Preview'),
+    ('result',              'Result'),
 ]
 
-THUMB_SIZE = 256
+THRESHOLD_TYPES = [
+    (0, "THRESH_BINARY (White Background)"),
+    (1, "THRESH_BINARY_INV (Black Backgrounf)"),
+    (2, "THRESH_TRUNC"),
+    (3, "THRESH_TOZERO"),
+    (4, "THRESH_TOZERO_INV"),
+]
+_THRESH_TYPE_VALUE_TO_LABEL = {value: label for value, label in THRESHOLD_TYPES}
+_THRESH_TYPE_LABEL_TO_VALUE = {label: value for value, label in THRESHOLD_TYPES}
+
+THUMB_SIZE = 384
 PREVIEW_SIZE = 1024
 
 
@@ -292,6 +301,8 @@ class CardCropEditor:
 
         self.threshold_val_var = tk.IntVar(value=args.threshhold_val)
         self.threshold_type_var = tk.IntVar(value=args.threshhold_type)
+        self.threshold_type_label_var = tk.StringVar(
+            value=_THRESH_TYPE_VALUE_TO_LABEL.get(args.threshhold_type, THRESHOLD_TYPES[0][1]))
         self.blur_var = tk.IntVar(value=args.blur)
         self.pad_var = tk.IntVar(value=args.pad)
         self.deskew = tk.BooleanVar(value=args.deskew)
@@ -312,16 +323,38 @@ class CardCropEditor:
         def on_move(v, var=var, val_lbl=val_lbl):
             var.set(int(float(v)))
             val_lbl.config(text=str(var.get()))
+
+        def on_release(event):
             self._schedule_recompute()
 
         scale = ttk.Scale(box, from_=frm, to=to, orient=tk.HORIZONTAL,
                            command=on_move, length=150)
         scale.set(var.get())
+        scale.bind('<ButtonRelease-1>', on_release)
+        scale.bind('<KeyRelease>', on_release)  # arrow-key nudges, not just mouse drag
         scale.pack(side=tk.TOP, fill=tk.X)
         return box
 
+    def _make_threshold_type_group(self, parent):
+        """Dropdown for the cv2.threshold `type` argument, showing the enum
+        name (and the black/white-background hint) instead of a raw int."""
+        box = ttk.LabelFrame(parent, text="Threshold - Type", padding=6)
+
+        combo = ttk.Combobox(box, textvariable=self.threshold_type_label_var,
+                              values=[label for _, label in THRESHOLD_TYPES],
+                              state='readonly', width=26)
+        combo.pack(side=tk.TOP, fill=tk.X)
+
+        def on_select(event):
+            self.threshold_type_var.set(
+                _THRESH_TYPE_LABEL_TO_VALUE[self.threshold_type_label_var.get()])
+            self._schedule_recompute()
+
+        combo.bind('<<ComboboxSelected>>', on_select)
+        return box
+
     def _build_controls(self):
-        top = ttk.Frame(self.root, padding=8)
+        top = ttk.Frame(self.root, padding=(8,0,0,0))
         top.pack(side=tk.TOP, fill=tk.X)
 
         self.filename_var = tk.StringVar(value="")
@@ -333,8 +366,7 @@ class CardCropEditor:
 
         self._make_slider_group(controls_row, "Threshold - Value",
                                  self.threshold_val_var, 0, 255).pack(side=tk.LEFT, padx=(0, 8))
-        self._make_slider_group(controls_row, "Threshold - Type",
-                                 self.threshold_type_var, 0, 4).pack(side=tk.LEFT, padx=(0, 8))
+        self._make_threshold_type_group(controls_row).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Blur kernel",
                                  self.blur_var, 1, 25).pack(side=tk.LEFT, padx=(0, 8))
         self._make_slider_group(controls_row, "Padding",
@@ -361,15 +393,11 @@ class CardCropEditor:
         self.root.bind('<q>', lambda e: self._on_quit())
 
     def _build_viewports(self):
-        hint = ttk.Label(self.root, text="Click a thumbnail to open a larger preview.",
-                          foreground="#666666", padding=(8, 0, 8, 4))
-        hint.pack(side=tk.TOP, anchor='w')
-
-        grid_frame = ttk.Frame(self.root, padding=8)
+        grid_frame = ttk.Frame(self.root, padding=(8, 2, 8, 8))
         grid_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self.panel_labels = {}
-        cols = 4
+        cols = 3
         for i, (key, title) in enumerate(DISPLAY_STEPS):
             r, c = divmod(i, cols)
             cell = ttk.Frame(grid_frame, borderwidth=1, relief='solid', padding=4)
@@ -465,15 +493,14 @@ class CardCropEditor:
         if steps.get('error'):
             self.status_var.set(steps['error'])
         else:
-            self.status_var.set(
-                f"angle={steps.get('angle', 0):.1f}  box={steps.get('box')}  "
-                f"-  looks good, press Save"
-            )
+            self.status_var.set("Status: OK")
 
     # -- button handlers ----------------------------------------------
     def _on_reset(self):
         self.threshold_val_var.set(self.args.threshhold_val)
         self.threshold_type_var.set(self.args.threshhold_type)
+        self.threshold_type_label_var.set(
+            _THRESH_TYPE_VALUE_TO_LABEL.get(self.args.threshhold_type, THRESHOLD_TYPES[0][1]))
         self.blur_var.set(self.args.blur)
         self.pad_var.set(self.args.pad)
         self.deskew.set(self.args.deskew)
@@ -500,7 +527,7 @@ class CardCropEditor:
     # -- public API ----------------------------------------------------
     def edit(self, path):
         """Show the editor for one image. Blocks until Save/Skip/Quit.
-        Returns 'save' | 'skip' | 'quit'. On 'save', self.last_steps['roi']
+        Returns 'save' | 'skip' | 'quit'. On 'save', self.last_steps['result']
         holds the crop to write out."""                    
         self.current_img = path
         self.action = None
@@ -546,7 +573,8 @@ def main():
     
     try:
         for f in files:
-            if editor:                
+            print(f"Processing {f}")
+            if editor:  
                 action = editor.edit(f)
                 if action == 'quit':
                     print("Quit.")
